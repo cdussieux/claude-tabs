@@ -4,7 +4,7 @@
 
 | Where | What |
 |---|---|
-| `~/.hammerspoon/claude-tabs/` | the module (`init.lua`, `strings.lua`), `config.lua`, `hook.sh`, `send-url.js`, `url-handler.js` |
+| `~/.hammerspoon/claude-tabs/` | the module (`init.lua`, `strings.lua`), `config.lua`, `profiles.json` (the tabs), `hook.sh`, `send-url.js`, `url-handler.js` |
 | `~/.hammerspoon/init.lua` | a block between `-- >>> claude-tabs` and `-- <<< claude-tabs` that loads it |
 | `~/Applications/Claude Tabs/` | one launcher per account, and `Claude Tabs Link Router.app` |
 | `~/.claude/settings.json` | the hooks (first backup: `settings.json.bak-claude-tabs`) |
@@ -22,6 +22,9 @@
   asked. Sign-in mode makes a router app the handler for a moment to trigger
   that, then gives the handler back. Claude re-registers itself as handler at
   every launch anyway.
+- **Knowing which tab is signing in**: Claude logs `[Auth] Using system browser for:` when a
+  window starts a browser sign-in (the log is shared by all instances, without pid); the
+  window in front at that moment is the one signing in.
 - **Sending a link to one instance**: `send-url.js` sends the `GURL` Apple Event
   to a pid, which `open` cannot do.
 - **Full-screen windows** live on their own Space and cannot be stacked: they

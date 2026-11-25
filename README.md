@@ -5,7 +5,7 @@ account, all in one window, with live counters of your Claude Code sessions.
 
 ```
 ┌──────────────────────────────────────────────────────────────────────┐
-│ 1  Personal   ①②  │ 2  Work            ③ │ 3  Client · closed        │
+│ 1  Personal   ①②  │ 2  Work            ③ │ 3  Client · closed   │ + │
 ├──────────────────────────────────────────────────────────────────────┤
 │                                                                      │
 │              the Claude Desktop window of the active tab             │
@@ -31,7 +31,10 @@ stacks their windows under a tab bar drawn by [Hammerspoon](https://www.hammersp
 - **Behaves like one window**: drag the tab bar to move the group to another
   screen; it fills the screen it is on (`autoFill`), and follows the Dock and
   screens being plugged or woken up. `⌃⌥E` moves it to the next screen.
-- **Sign-in mode** (`⌃⌥L`) to sign in to an extra account in its own tab (see below).
+- **`+` button** after the last tab to add an account; **right-click a tab** to
+  rename or remove it.
+- **Sign-ins land in the right tab**: the browser's "Open Claude" link goes back
+  to the tab that started the sign-in, automatically (see below).
 - **Launchers**: `~/Applications/Claude Tabs/Claude <Account>.app`, for Spotlight.
 - English and French interface.
 
@@ -52,10 +55,11 @@ Then:
 
 1. Give Hammerspoon **Accessibility** access: System Settings → Privacy &
    Security → Accessibility (it moves and focuses windows).
-2. Edit `~/.hammerspoon/claude-tabs/config.lua`: one entry per account. The
-   entry with `dataDir = nil` is the Claude you already use; each other entry
-   gets its own data folder. Saving reloads Claude Tabs.
-3. Click each new tab once and sign in (next section).
+2. The bar shows one tab: the Claude you already use. Click **`+`**, name the
+   new account, and sign in in the window that opens. Repeat for each account.
+3. Optional: `~/.hammerspoon/claude-tabs/config.lua` (language, screen,
+   shortcuts…). Saving reloads Claude Tabs. The tabs themselves are kept in
+   `profiles.json` next to it.
 
 `install.sh` also updates: run it again after a `git pull`. Your `config.lua`
 is kept.
@@ -63,18 +67,21 @@ is kept.
 ## Signing in to another account
 
 Claude's sign-in ends with an "Open Claude" button in your browser, and macOS
-sends that link to the first Claude instance it finds, not to the new tab.
-So, for each extra account:
+sends that `claude://` link to the first Claude instance it finds, not to the
+tab you are signing in. Claude Tabs fixes that by itself: just sign in in the
+tab's window and click "Open Claude".
 
-1. Click its tab, then press **`⌃⌥L`** (sign-in mode). The tab says
-   "sign-in: click “Open Claude”".
-2. Sign in in that window, and click "Open Claude" in the browser if asked.
+How: when a Claude window starts a browser sign-in, Claude writes
+`[Auth] Using system browser for: /login/…` in its log. Claude Tabs sees it,
+notes which account's window is in front, and for a few minutes makes a tiny
+router app the `claude://` handler. The "Open Claude" link reaches the router,
+which hands it to Hammerspoon, which sends it to that account's instance only
+(an Apple Event addressed to its pid). Claude gets `claude://` links back right
+after.
 
-The account lands in the right tab and sign-in mode turns itself off. How: for
-the duration, a tiny router app takes over `claude://` links; Claude notices
-and signs in through macOS' own sign-in sheet, which answers the right
-instance. Any `claude://` link that still arrives is forwarded to the right
-instance. Claude gets `claude://` links back right after.
+If it ever fails, **`⌃⌥L`** (or right-click → "Sign in to this account") turns
+sign-in mode on by hand before you start: Claude then signs in through macOS'
+own sign-in sheet, which answers the right instance directly.
 
 ## Shortcuts
 
@@ -85,7 +92,9 @@ instance. Claude gets `claude://` links back right after.
 | drag the tab bar | move the group; drop it on a screen to fill that screen |
 | `⌃⌥E` | move to the next screen |
 | `⌃⌥F`, double-click the bar | fill the screen (with `autoFill = false`: toggle) |
-| `⌃⌥L` | sign-in mode for the current tab |
+| `+` after the last tab | add an account |
+| right-click a tab | sign in, rename, remove |
+| `⌃⌥L` | sign-in mode for the current tab, by hand |
 
 All are configurable in `config.lua`.
 
@@ -121,7 +130,7 @@ tests/smoke.sh     # live test of the installed copy (Hammerspoon + one Claude o
 ## Uninstall
 
 ```bash
-./uninstall.sh           # keeps your config.lua
+./uninstall.sh           # keeps your config.lua and tabs (profiles.json)
 ./uninstall.sh --purge   # removes everything Claude Tabs added
 ```
 

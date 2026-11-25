@@ -49,16 +49,44 @@ local function expand(p)
   return (p:gsub("^~", HOME):gsub("/+$", ""))
 end
 
-local profiles, byId = {}, {}
-for i, p in ipairs(cfg.profiles) do
-  local prof = {
-    id = p.id, label = p.label or p.id, color = p.color or "#888888",
-    dataDir = expand(p.dataDir), index = i,
+-- The tabs live in profiles.json, edited by the "+" button and the tab menu
+-- (right-click). On first start it is seeded from config.profiles.
+local PROFILES_FILE = DIR .. "/profiles.json"
+local PALETTE = { "#D97757", "#4F8EF7", "#3DBE8B", "#B07CE8", "#E8B13C", "#E86A8C", "#4FC3C7", "#9AA0A6" }
+
+local function newProfile(p, i)
+  return {
+    id = p.id, label = p.label or p.id, color = p.color or PALETTE[(i - 1) % #PALETTE + 1],
+    rawDataDir = p.dataDir, dataDir = expand(p.dataDir), index = i,
     pid = nil,
     sessions = {},  -- cliSessionId -> { state = "working"|"done"|"attention", at = ms, file = path }
   }
-  profiles[i] = prof
-  byId[prof.id] = prof
+end
+
+local function loadProfileList()
+  local s = readFile(PROFILES_FILE)
+  local ok, list = pcall(function() return s and hs.json.decode(s) end)
+  if ok and type(list) == "table" and #list > 0 then return list end
+  list = {}
+  for _, p in ipairs(cfg.profiles or { { id = "main", label = "Claude" } }) do
+    list[#list + 1] = { id = p.id, label = p.label, color = p.color, dataDir = p.dataDir }
+  end
+  writeFile(PROFILES_FILE, hs.json.encode(list, true))
+  return list
+end
+
+local profiles, byId = {}, {}
+for i, p in ipairs(loadProfileList()) do
+  profiles[i] = newProfile(p, i)
+  byId[p.id] = profiles[i]
+end
+
+local function saveProfileList()
+  local list = {}
+  for _, p in ipairs(profiles) do
+    list[#list + 1] = { id = p.id, label = p.label, color = p.color, dataDir = p.rawDataDir }
+  end
+  writeFile(PROFILES_FILE, hs.json.encode(list, true))
 end
 
 local activeId = nil
@@ -497,8 +525,25 @@ end
 -- group like a title bar, and double-clicking it fills the screen.
 local dragTap
 local lastDown = { t = 0, x = -100 }
+local PLUS_W = cfg.addButton == false and 0 or 32
+local tabMenu  -- defined with the tab actions below
+local function tabWidth() return (zone().bar.w - PLUS_W) / #profiles end
+
 local function onBarClick(_, msg, _, x, _)
   if msg ~= "mouseDown" then return end
+  local buttons = hs.eventtap.checkMouseButtons()
+  local flags = hs.eventtap.checkKeyboardModifiers()
+  local onPlus = PLUS_W > 0 and x >= zone().bar.w - PLUS_W
+  if onPlus then
+    hs.timer.doAfter(0, function() M.addProfile() end)
+    return
+  end
+  -- Right-click (or ctrl-click) on a tab: its menu.
+  if buttons.right or flags.ctrl then
+    local p = profiles[math.floor(x / tabWidth()) + 1]
+    if p then hs.timer.doAfter(0, function() tabMenu(p) end) end
+    return
+  end
   local now = hs.timer.secondsSinceEpoch()
   if WINDOW_MODE and now - lastDown.t < 0.35 and math.abs(x - lastDown.x) < 6 then
     lastDown.t = 0
@@ -507,7 +552,7 @@ local function onBarClick(_, msg, _, x, _)
     return
   end
   lastDown = { t = now, x = x }
-  local i = math.floor(x / (zone().bar.w / #profiles)) + 1
+  local i = math.floor(x / tabWidth()) + 1
   if not WINDOW_MODE then
     if profiles[i] then M.switchTo(profiles[i].id) end
     return
@@ -563,8 +608,19 @@ drawBar = function()
     canvas:frame(z.bar)
   end
 
-  local tabW = z.bar.w / #profiles
+  local tabW = (z.bar.w - PLUS_W) / #profiles
   local els = { { type = "rectangle", action = "fill", fillColor = COLORS.bg } }
+  if PLUS_W > 0 then  -- "+" button after the last tab: add an account
+    els[#els + 1] = {
+      type = "text",
+      frame = { x = z.bar.w - PLUS_W, y = (BAR_H - 22) / 2, w = PLUS_W, h = 22 },
+      text = hs.styledtext.new("+", {
+        font = { name = "HelveticaNeue-Light", size = 20 },
+        color = { white = 1, alpha = 0.7 },
+        paragraphStyle = { alignment = "center" },
+      }),
+    }
+  end
   for i, p in ipairs(profiles) do
     local x0 = (i - 1) * tabW
     local active = (p.id == activeId) and p.pid ~= nil
@@ -664,6 +720,8 @@ local function drawMenubar()
       items[#items + 1] = { title = S.menuNextScreen, fn = function() M.nextScreen() end }
       items[#items + 1] = { title = "-" }
     end
+    items[#items + 1] = { title = S.menuAdd, fn = function() M.addProfile() end }
+    items[#items + 1] = { title = "-" }
     items[#items + 1] = { title = S.menuConfig, fn = function()
       hs.execute("open -t " .. shq(DIR .. "/config.lua")) end }
     items[#items + 1] = { title = S.menuReload, fn = hs.reload }
@@ -723,6 +781,104 @@ function M.cycle(dir)
     local p = profiles[((start - 1 + dir * step) % n) + 1]
     if p.pid then M.switchTo(p.id); return end
   end
+end
+
+---------------------------------------------------------------------------
+-- Adding, renaming and removing tabs ("+" button, right-click on a tab)
+---------------------------------------------------------------------------
+
+M.hotkeys = {}
+local function bindTabHotkey(p)
+  if p.index <= 9 then
+    M.hotkeys[#M.hotkeys + 1] = hs.hotkey.bind(MODS, tostring(p.index), function() M.switchTo(p.id) end)
+  end
+end
+
+local function trim(s) return ((s or ""):gsub("^%s+", ""):gsub("%s+$", "")) end
+
+local function uniqueId(label)
+  local id = label:lower():gsub("[^%w]+", "-"):gsub("^%-+", ""):gsub("%-+$", "")
+  if id == "" then id = "account" end
+  local base, n = id, 2
+  while byId[id] do id = base .. "-" .. n; n = n + 1 end
+  return id
+end
+
+local function ask(title, prompt, default, okButton)
+  hs.focus()
+  local button, text = hs.dialog.textPrompt(title, prompt, default or "", okButton, S.cancel)
+  if button ~= okButton then return nil end
+  local t = trim(text)
+  return t ~= "" and t or nil
+end
+
+-- New account: a new tab with its own data folder. Launches it; you sign in
+-- in its window, and the sign-in comes back to it (see watchClaudeLog).
+function M.addProfile(label)
+  label = label or ask(S.addTitle, S.addPrompt, "", S.addButton)
+  if not label then return end
+  local used = {}
+  for _, p in ipairs(profiles) do used[p.color] = true end
+  local color = PALETTE[#profiles % #PALETTE + 1]
+  for _, c in ipairs(PALETTE) do if not used[c] then color = c; break end end
+  local id = uniqueId(label)
+  local p = newProfile({ id = id, label = label, color = color, dataDir = "~/.claude-profiles/" .. id }, #profiles + 1)
+  profiles[#profiles + 1] = p
+  byId[id] = p
+  saveProfileList()
+  M.makeLaunchers()
+  bindTabHotkey(p)
+  hs.alert.show(S.addedHint:format(label), 6)
+  M.switchTo(id)
+  return id
+end
+
+function M.renameProfile(id, label)
+  local p = byId[id]
+  if not p then return end
+  label = label or ask(S.renameTitle, S.renamePrompt, p.label, S.renameButton)
+  if not label or label == p.label then return end
+  hs.execute("rm -rf " .. shq(LAUNCHER_DIR .. "/Claude " .. p.label .. ".app"))
+  p.label = label
+  saveProfileList()
+  M.makeLaunchers()
+  draw()
+end
+
+-- Removes the tab (and quits its Claude). Its data folder is kept.
+function M.removeProfile(id, confirmed)
+  local p = byId[id]
+  if not p or #profiles <= 1 then return end
+  if not confirmed then
+    hs.focus()
+    local where = p.rawDataDir or "~/Library/Application Support/Claude"
+    local answer = hs.dialog.blockAlert(S.removeTitle:format(p.label), S.removeText:format(where),
+      S.removeButton, S.cancel, "warning")
+    if answer ~= S.removeButton then return end
+  end
+  if p.pid and p.dataDir then  -- never quit the main Claude
+    local app = hs.application.applicationForPID(p.pid)
+    if app then app:kill() end
+  end
+  hs.execute("rm -rf " .. shq(LAUNCHER_DIR .. "/Claude " .. p.label .. ".app"))
+  table.remove(profiles, p.index)
+  byId[id] = nil
+  saveProfileList()
+  hs.reload()  -- simplest way to renumber tabs and shortcuts
+end
+
+tabMenu = function(p)
+  local items = {
+    { title = S.menuSignInTab, fn = function() M.startSignIn(p.id) end },
+    { title = S.menuRename, fn = function() M.renameProfile(p.id) end },
+    { title = S.menuRemove, disabled = #profiles <= 1, fn = function() M.removeProfile(p.id) end },
+    { title = "-" },
+    { title = S.menuAdd, fn = function() M.addProfile() end },
+  }
+  if M.tabPopup then M.tabPopup:delete() end
+  M.tabPopup = hs.menubar.new(false)
+  M.tabPopup:setMenu(items)
+  M.tabPopup:popupMenu(hs.mouse.absolutePosition())
 end
 
 -- Modifier + scroll (mouse or trackpad) while Claude is in front: one notch =
@@ -809,35 +965,15 @@ local function urlHandler(action, bundle)
   return ok and out or nil
 end
 
--- Watch Claude's log for the end of the sign-in, to leave sign-in mode by itself.
-local function watchSignIn()
-  local attrs = hs.fs.attributes(CLAUDE_LOG)
-  logOffset = attrs and attrs.size or 0
-  logWatcher = hs.pathwatcher.new(CLAUDE_LOG, function()
-    local f = io.open(CLAUDE_LOG, "r")
-    if not f then return end
-    f:seek("set", logOffset)
-    local chunk = f:read("a") or ""
-    logOffset = f:seek()
-    f:close()
-    if chunk:find("ASWebAuth completed", 1, true) or chunk:find("verified sign-in", 1, true) then
-      local target = signInTarget
-      M.stopSignIn()
-      hs.alert.show(S.signInDone)
-      if target then hs.timer.doAfter(1.5, function() M.switchTo(target) end) end
-    end
-  end):start()
-end
-
 function M.stopSignIn()
   if signInTimer then signInTimer:stop(); signInTimer = nil end
-  if logWatcher then logWatcher:stop(); logWatcher = nil end
   signInTarget = nil
   if urlHandler("get") ~= BUNDLE then urlHandler("set", BUNDLE) end
   draw()
 end
 
-function M.startSignIn(id)
+-- quiet = started automatically from the log (the account is already in front).
+function M.startSignIn(id, quiet)
   local p = byId[id or activeId]
   if not p then return end
   if urlHandler("set", ROUTER_ID) ~= ROUTER_ID then
@@ -846,15 +982,50 @@ function M.startSignIn(id)
   end
   signInTarget = p.id
   if signInTimer then signInTimer:stop() end
-  if logWatcher then logWatcher:stop() end
-  watchSignIn()
   signInTimer = hs.timer.doAfter(300, function()
     M.stopSignIn()
     hs.alert.show(S.signInTimeout)
   end)
-  hs.alert.show(S.signInOn:format(p.label), 4)
-  M.switchTo(p.id)
+  if quiet then
+    hs.alert.show(S.signInAuto:format(p.label), 4)
+  else
+    hs.alert.show(S.signInOn:format(p.label), 4)
+    M.switchTo(p.id)
+  end
   draw()
+end
+
+-- Claude's log (shared by all instances). Two lines matter:
+--  "[Auth] Using system browser for: /login/…": an account just opened a sign-in
+--    in the browser, from the window in front. Route the coming "Open Claude"
+--    link to it: start sign-in mode for that account, quietly.
+--  "ASWebAuth completed" / "verified sign-in": the sign-in is done.
+local function watchClaudeLog()
+  local attrs = hs.fs.attributes(CLAUDE_LOG)
+  logOffset = attrs and attrs.size or 0
+  logWatcher = hs.pathwatcher.new(CLAUDE_LOG, function()
+    local a = hs.fs.attributes(CLAUDE_LOG)
+    if not a then return end
+    if a.size < logOffset then logOffset = 0 end  -- log rotated
+    local f = io.open(CLAUDE_LOG, "r")
+    if not f then return end
+    f:seek("set", logOffset)
+    local chunk = f:read("a") or ""
+    logOffset = f:seek()
+    f:close()
+    if signInTarget and (chunk:find("ASWebAuth completed", 1, true) or chunk:find("verified sign-in", 1, true)) then
+      local target = signInTarget
+      M.stopSignIn()
+      hs.alert.show(S.signInDone)
+      if target then hs.timer.doAfter(1.5, function() M.switchTo(target) end) end
+    elseif cfg.autoSignIn ~= false and not signInTarget
+      and chunk:find("[Auth] Using system browser for:", 1, true) then
+      local front = hs.application.frontmostApplication()
+      local p = front and front:bundleID() == BUNDLE and pidProfile(front:pid())
+      if p then M.startSignIn(p.id, true) end
+    end
+  end):start()
+  return logWatcher
 end
 
 -- hammerspoon://claude-tabs-link, sent by the router with the link in PENDING_LINK.
@@ -969,6 +1140,9 @@ end
 
 function M.start()
   hs.window.animationDuration = 0
+  -- A Claude instance that is starting or busy can be slow to answer the
+  -- accessibility API: don't let it freeze the bar for long.
+  hs.window.timeout(2)
   M.makeLaunchers()
   loadSessions()
   refresh()
@@ -1072,12 +1246,7 @@ function M.start()
     end)
   end
 
-  M.hotkeys = {}
-  for i, p in ipairs(profiles) do
-    if i <= 9 then
-      M.hotkeys[#M.hotkeys + 1] = hs.hotkey.bind(MODS, tostring(i), function() M.switchTo(p.id) end)
-    end
-  end
+  for _, p in ipairs(profiles) do bindTabHotkey(p) end
   M.hotkeys[#M.hotkeys + 1] = hs.hotkey.bind(MODS, "F", function() M.fillScreen() end)
   M.hotkeys[#M.hotkeys + 1] = hs.hotkey.bind(MODS, "E", function() M.nextScreen() end)
   M.hotkeys[#M.hotkeys + 1] = hs.hotkey.bind(MODS, "L", function()
@@ -1087,6 +1256,7 @@ function M.start()
 
   hs.urlevent.bind("claude-tabs", onHookEvent)
   hs.urlevent.bind("claude-tabs-link", onRouterLink)
+  M.logWatcher = watchClaudeLog()
   -- If Hammerspoon restarted during sign-in mode, give claude:// links back to Claude.
   if urlHandler("get") == ROUTER_ID then urlHandler("set", BUNDLE) end
 
@@ -1121,7 +1291,7 @@ function M.forgetSession(cliId)
 end
 
 function M.state()
-  local out = {}
+  local out = { "signIn=" .. tostring(signInTarget) }
   for _, p in ipairs(profiles) do
     local w, d, a = counts(p)
     out[#out + 1] = string.format("%s pid=%s working=%d done=%d attention=%d active=%s",

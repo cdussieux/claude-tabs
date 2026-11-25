@@ -19,15 +19,22 @@ return {
   -- nil, or a screen that is not connected = the main screen.
   screen = nil,
 
-  -- One tab per account. dataDir = nil is your usual Claude install (the
-  -- account you are signed in to today). Each other account gets its own data
-  -- folder, hence its own sign-in. No spaces in paths. `id` names the launcher
-  -- app; `label` and `color` are free.
+  -- Tabs at first start. After that, add tabs with the "+" button and rename or
+  -- remove them with a right-click; they are kept in profiles.json, next to
+  -- this file (edit it by hand if you like, then reload).
+  -- dataDir = nil is your usual Claude install (the account you are signed in
+  -- to today). Each other account gets its own data folder, hence its own
+  -- sign-in. No spaces in paths.
   profiles = {
-    { id = "main",  label = "Personal", color = "#D97757", dataDir = nil },
-    { id = "work",  label = "Work",     color = "#4F8EF7", dataDir = "~/.claude-profiles/work" },
-    -- { id = "client", label = "Client", color = "#3DBE8B", dataDir = "~/.claude-profiles/client" },
+    { id = "main", label = "Personal", color = "#D97757", dataDir = nil },
   },
+
+  -- The "+" button after the last tab.
+  addButton = true,
+
+  -- Send the browser's "Open Claude" sign-in link to the tab that started the
+  -- sign-in (without this, macOS gives it to the first Claude started).
+  autoSignIn = true,
 
   -- Shortcuts: mods + 1, 2, 3… go to tab n; + F fills the screen; + E moves to
   -- the next screen; + L starts sign-in mode for the current tab.
