@@ -1,0 +1,51 @@
+-- User-facing text, by language (config.language). Add a language by copying
+-- the "en" table.
+
+local function plural(n, one, many) return n > 1 and many or one end
+
+return {
+  en = {
+    closed = "closed",
+    signInHint = "sign-in: click “Open Claude”",
+    working = function(n) return n .. " working" end,
+    done = function(n) return n .. " done" end,
+    waiting = function(n) return n .. " waiting for you" end,
+    menuStopSignIn = "Stop sign-in mode (%s)",
+    menuSignIn = "Sign in “%s” (sign-in mode, ⌃⌥L)",
+    menuFill = "Fill the screen / previous size  (⌃⌥F, double-click the bar)",
+    menuNextScreen = "Move to the next screen  (⌃⌥E)",
+    menuConfig = "Open config",
+    menuReload = "Reload",
+    notRunning = "Claude Tabs: this tab is not running",
+    linkSent = "Link sent to “%s”",
+    sendFailed = "Claude Tabs: could not send the link\n%s",
+    signInFailed = "Claude Tabs: could not start sign-in mode",
+    signInTimeout = "Claude Tabs: sign-in mode stopped (5 min without sign-in)",
+    signInOn = "Sign-in mode: the next “Open Claude” goes to “%s”",
+    signInDone = "Claude Tabs: signed in",
+    signInStopped = "Sign-in mode stopped",
+    ready = "Claude Tabs ready on screen: %s",
+  },
+  fr = {
+    closed = "fermé",
+    signInHint = "connexion : clique « Open Claude »",
+    working = function(n) return n .. " en cours" end,
+    done = function(n) return n .. plural(n, " finie", " finies") end,
+    waiting = function(n) return n .. plural(n, " t'attend", " t'attendent") end,
+    menuStopSignIn = "Arrêter le mode connexion (%s)",
+    menuSignIn = "Connecter « %s » (mode connexion, ⌃⌥L)",
+    menuFill = "Remplir l'écran / taille d'avant  (⌃⌥F, double-clic sur la barre)",
+    menuNextScreen = "Passer sur l'écran suivant  (⌃⌥E)",
+    menuConfig = "Ouvrir la config",
+    menuReload = "Recharger",
+    notRunning = "Claude Tabs : cet onglet n'est pas lancé",
+    linkSent = "Lien envoyé à « %s »",
+    sendFailed = "Claude Tabs : échec de l'envoi\n%s",
+    signInFailed = "Claude Tabs : impossible d'activer le mode connexion",
+    signInTimeout = "Claude Tabs : mode connexion arrêté (5 min sans connexion)",
+    signInOn = "Mode connexion : le prochain « Open Claude » ira à « %s »",
+    signInDone = "Claude Tabs : connexion terminée",
+    signInStopped = "Mode connexion arrêté",
+    ready = "Claude Tabs prêt sur l'écran : %s",
+  },
+}

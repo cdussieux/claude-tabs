@@ -1,0 +1,50 @@
+#!/bin/bash
+# Live test of an installed Claude Tabs: Hammerspoon must be running with
+# Claude Tabs loaded, and at least one configured account open in Claude.
+# Sends fake hook events for a fake session and checks the counters, then
+# checks the layout and the claude:// handler. Leaves nothing behind.
+set -uo pipefail
+
+HS=/Applications/Hammerspoon.app/Contents/Frameworks/hs/hs
+HOOK="$HOME/.hammerspoon/claude-tabs/hook.sh"
+fails=0
+ok()   { printf '  ok    %s\n' "$*"; }
+fail() { printf '  FAIL  %s\n' "$*"; fails=$((fails + 1)); }
+q()    { "$HS" -t 10 -c "$1" 2>&1; }
+
+pgrep -xq Hammerspoon || { echo "Hammerspoon is not running."; exit 1; }
+[ "$(q 'return ClaudeTabs ~= nil')" = true ] || { echo "Claude Tabs is not loaded (run install.sh)."; exit 1; }
+
+PID=$(q 'for _, a in ipairs(hs.application.applicationsForBundleID("com.anthropic.claudefordesktop")) do return a:pid() end return ""')
+[ -n "$PID" ] || { echo "No Claude instance running."; exit 1; }
+SID="claude-tabs-test-$$"
+SHORT=${SID:0:8}
+
+# Sends one hook event the way Claude Code would, then reads the test session's state.
+send() {
+  printf '{"session_id":"%s"%s}' "$SID" "${2:-}" | CLAUDE_TABS_TEST_PID=$PID "$HOOK" "$1"
+  sleep 1
+  q 'return ClaudeTabs.state()' | awk -v s="$SHORT" '$1 == s { print $2 }'
+}
+expect() { [ "$2" = "$3" ] && ok "$1 -> ${3:-gone}" || fail "$1: expected '${3:-gone}', got '${2:-gone}'"; }
+
+echo "Session counters (pid $PID)"
+expect "prompt"                "$(send prompt)" working
+expect "idle reminder ignored" "$(send attention ',"notification_type":"idle_prompt"')" working
+expect "question asked"        "$(send attention ',"notification_type":"permission_prompt"')" attention
+expect "question answered"     "$(send answered)" working
+expect "stop"                  "$(send stop)" done
+q "ClaudeTabs.forgetSession('$SID')" >/dev/null
+expect "cleanup"               "$(q 'return ClaudeTabs.state()' | awk -v s="$SHORT" '$1 == s { print $2 }')" ""
+
+echo "Layout"
+[ "$(q 'return ClaudeTabs.layoutOk()')" = true ] && ok "bar and front window in place" \
+  || fail "layout: $(q 'return ClaudeTabs.geometry()')"
+
+echo "claude:// handler"
+h=$(osascript -l JavaScript "$HOME/.hammerspoon/claude-tabs/url-handler.js" get 2>&1)
+[ "$h" = com.anthropic.claudefordesktop ] && ok "Claude handles claude:// links" || fail "handler is $h"
+
+echo
+if [ "$fails" = 0 ]; then echo "Smoke test passed."; else echo "$fails test(s) failed."; fi
+exit "$fails"
