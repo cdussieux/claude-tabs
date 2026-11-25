@@ -22,7 +22,8 @@ has_app() { osascript -e "id of application id \"$1\"" >/dev/null 2>&1; }
 has_app org.hammerspoon.Hammerspoon || die "Hammerspoon is not installed: brew install --cask hammerspoon"
 has_app com.anthropic.claudefordesktop || die "Claude Desktop is not installed: https://claude.ai/download"
 
-# 1. The module
+# 1. The module (if it is already loaded, copying its files reloads it by itself)
+ALREADY=0; [ -f "$DEST/init.lua" ] && ALREADY=1
 mkdir -p "$DEST"
 cp "$SRC"/src/init.lua "$SRC"/src/strings.lua "$SRC"/src/hook.sh \
    "$SRC"/src/send-url.js "$SRC"/src/url-handler.js "$DEST"/
@@ -74,12 +75,13 @@ osascript -l JavaScript "$SRC/scripts/claude-settings.js" add "$SETTINGS" "$DEST
 
 # 5. (Re)load
 HS=/Applications/Hammerspoon.app/Contents/Frameworks/hs/hs
+# `hs` has no real time limit and hangs if Hammerspoon is busy reloading: cap it.
+hsq() { perl -e 'alarm shift; exec @ARGV' 8 "$HS" -c "$1" 2>/dev/null; }
 if pgrep -xq Hammerspoon; then
-  # The reload drops the CLI's connection, so its exit code means nothing.
-  if [ "$("$HS" -t 5 -c 'return 1' 2>/dev/null)" = 1 ]; then
-    "$HS" -t 5 -c 'hs.reload()' >/dev/null 2>&1 || true
-  else
-    say "Reload Hammerspoon (menu bar icon > Reload Config)."
+  if [ "$ALREADY" = 0 ]; then
+    # The reload drops the CLI's connection, so its exit code means nothing.
+    if [ "$(hsq 'return 1')" = 1 ]; then hsq 'hs.reload()' >/dev/null || true
+    else say "Reload Hammerspoon (menu bar icon > Reload Config)."; fi
   fi
 else
   open -a Hammerspoon

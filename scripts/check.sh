@@ -31,7 +31,10 @@ echo "Lua"
 HS=/Applications/Hammerspoon.app/Contents/Frameworks/hs/hs
 for f in src/init.lua src/strings.lua config.example.lua; do
   if pgrep -xq Hammerspoon && [ -x "$HS" ]; then
-    out=$("$HS" -t 10 -c "local f, e = loadfile('$PWD/$f'); return f and 'ok' or e" 2>&1)
+    for _ in 1 2 3; do  # hs refuses calls for a moment after a reload: retry
+      out=$(perl -e 'alarm shift; exec @ARGV' 10 "$HS" -c "local f, e = loadfile('$PWD/$f'); return f and 'ok' or e" 2>&1)
+      [ "$out" = ok ] && break; sleep 2
+    done
     [ "$out" = ok ] && ok "$f" || fail "$f: $out"
   elif command -v luac >/dev/null; then
     luac -p "$f" && ok "$f" || fail "$f"

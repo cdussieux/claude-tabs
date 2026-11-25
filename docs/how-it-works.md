@@ -25,6 +25,15 @@
 - **Knowing which tab is signing in**: Claude logs `[Auth] Using system browser for:` when a
   window starts a browser sign-in (the log is shared by all instances, without pid); the
   window in front at that moment is the one signing in.
+- **Claude keeps its log file open**, so macOS file events never report its
+  writes: the log is polled every second (by size) instead.
+- **The browser comes forward before the log line is read**: the account
+  signing in is then the last Claude tab that was in front.
+- **The `hs` command line has no real time limit** (`-t` is not one) and hangs
+  or refuses calls while Hammerspoon reloads: scripts cap it with
+  `perl -e 'alarm N; exec @ARGV'` and retry.
+- **Canvases only report left clicks**: right-clicks on the bar are caught with
+  an event tap.
 - **Sending a link to one instance**: `send-url.js` sends the `GURL` Apple Event
   to a pid, which `open` cannot do.
 - **Full-screen windows** live on their own Space and cannot be stacked: they

@@ -13,6 +13,7 @@ SETTINGS="$HOME/.claude/settings.json"
 HS=/Applications/Hammerspoon.app/Contents/Frameworks/hs/hs
 LSREGISTER=/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister
 PURGE=0
+hsq() { perl -e 'alarm shift; exec @ARGV' 8 "$HS" -c "$1" 2>/dev/null; }
 [ "${1:-}" = "--purge" ] && PURGE=1
 
 # claude:// links back to Claude, in case sign-in mode was on.
@@ -52,9 +53,9 @@ fi
 # Saved state (group position, session counters) and reload
 if pgrep -xq Hammerspoon; then
   if [ "$PURGE" = 1 ]; then
-    "$HS" -c 'for _, k in ipairs({"claudeTabs.groupFrame", "claudeTabs.sessions"}) do hs.settings.clear(k) end' >/dev/null 2>&1 || true
+    hsq 'for _, k in ipairs({"claudeTabs.groupFrame", "claudeTabs.sessions"}) do hs.settings.clear(k) end' >/dev/null || true
   fi
-  "$HS" -c 'hs.reload()' >/dev/null 2>&1 || true
+  hsq 'hs.reload()' >/dev/null || true
 fi
 
 echo "Claude Tabs removed."

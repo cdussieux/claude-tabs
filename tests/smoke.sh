@@ -10,15 +10,18 @@ HOOK="$HOME/.hammerspoon/claude-tabs/hook.sh"
 fails=0
 ok()   { printf '  ok    %s\n' "$*"; }
 fail() { printf '  FAIL  %s\n' "$*"; fails=$((fails + 1)); }
-q()    { "$HS" -t 10 -c "$1" 2>&1; }
+# hs alone has no time limit, and refuses calls for a moment after a reload: cap and retry.
+q()    { local r i; for i in 1 2 3; do r=$(perl -e 'alarm shift; exec @ARGV' 15 "$HS" -c "$1" 2>/dev/null) && { printf '%s\n' "$r"; return 0; }; sleep 2; done; return 1; }
 
 pgrep -xq Hammerspoon || { echo "Hammerspoon is not running."; exit 1; }
 [ "$(q 'return ClaudeTabs ~= nil')" = true ] || { echo "Claude Tabs is not loaded (run install.sh)."; exit 1; }
 
 PID=$(q 'for _, a in ipairs(hs.application.applicationsForBundleID("com.anthropic.claudefordesktop")) do return a:pid() end return ""')
 [ -n "$PID" ] || { echo "No Claude instance running."; exit 1; }
-SID="claude-tabs-test-$$"
+SID="ct$(printf '%06d' $(( (RANDOM * 32768 + RANDOM) % 1000000 )))-claude-tabs-test"
 SHORT=${SID:0:8}
+q "ClaudeTabs.forgetSession('ct*')" >/dev/null                 # leftovers of interrupted runs
+q "ClaudeTabs.forgetSession('claude-tabs-test*')" >/dev/null   # (older naming)
 
 # Sends one hook event the way Claude Code would, then reads the test session's state.
 send() {

@@ -200,7 +200,14 @@ end
 
 local function loadSessions()
   local all = hs.settings.get(SESSIONS_KEY) or {}
-  for _, p in ipairs(profiles) do p.sessions = all[p.id] or {} end
+  -- Copy each table: equal saved values (e.g. empty ones) can come back as
+  -- one shared Lua table, which would make every tab show the same sessions.
+  for _, p in ipairs(profiles) do
+    p.sessions = {}
+    for id, s in pairs(all[p.id] or {}) do
+      p.sessions[id] = { state = s.state, at = s.at, file = s.file }
+    end
+  end
 end
 
 local function counts(p)
@@ -947,6 +954,7 @@ function M.sendLink(url, id)
   local out, ok = hs.execute("/usr/bin/osascript -l JavaScript " .. shq(DIR .. "/send-url.js")
     .. " " .. math.tointeger(p.pid) .. " " .. shq(url) .. " 2>&1")
   if ok then
+    log.i("claude:// link sent to " .. p.id .. " (pid " .. math.tointeger(p.pid) .. ")")
     hs.alert.show(S.linkSent:format(p.label))
     M.switchTo(p.id)
   else
@@ -967,6 +975,7 @@ end
 
 function M.stopSignIn()
   if signInTimer then signInTimer:stop(); signInTimer = nil end
+  if signInTarget then log.i("sign-in mode off for " .. signInTarget) end
   signInTarget = nil
   if urlHandler("get") ~= BUNDLE then urlHandler("set", BUNDLE) end
   draw()
@@ -981,6 +990,7 @@ function M.startSignIn(id, quiet)
     return
   end
   signInTarget = p.id
+  log.i("sign-in mode on for " .. p.id .. (quiet and " (detected in Claude's log)" or ""))
   if signInTimer then signInTimer:stop() end
   signInTimer = hs.timer.doAfter(300, function()
     M.stopSignIn()
@@ -1000,12 +1010,14 @@ end
 --    in the browser, from the window in front. Route the coming "Open Claude"
 --    link to it: start sign-in mode for that account, quietly.
 --  "ASWebAuth completed" / "verified sign-in": the sign-in is done.
+-- Polled every second: Claude keeps its log open, so macOS file events don't
+-- report its writes.
 local function watchClaudeLog()
   local attrs = hs.fs.attributes(CLAUDE_LOG)
   logOffset = attrs and attrs.size or 0
-  logWatcher = hs.pathwatcher.new(CLAUDE_LOG, function()
+  logWatcher = hs.timer.doEvery(1, function()
     local a = hs.fs.attributes(CLAUDE_LOG)
-    if not a then return end
+    if not a or a.size == logOffset then return end
     if a.size < logOffset then logOffset = 0 end  -- log rotated
     local f = io.open(CLAUDE_LOG, "r")
     if not f then return end
@@ -1020,11 +1032,14 @@ local function watchClaudeLog()
       if target then hs.timer.doAfter(1.5, function() M.switchTo(target) end) end
     elseif cfg.autoSignIn ~= false and not signInTarget
       and chunk:find("[Auth] Using system browser for:", 1, true) then
+      -- The browser has usually come forward by now: then the account that
+      -- started the sign-in is the last Claude tab that was in front.
       local front = hs.application.frontmostApplication()
       local p = front and front:bundleID() == BUNDLE and pidProfile(front:pid())
+      p = p or (activeId and byId[activeId])
       if p then M.startSignIn(p.id, true) end
     end
-  end):start()
+  end)
   return logWatcher
 end
 
@@ -1238,6 +1253,17 @@ function M.start()
   end)
   for _, p in ipairs(profiles) do watchSessions(p); rescan(p) end
 
+  -- Right-click on a tab: its menu. The canvas only reports left clicks, so
+  -- catch right clicks that land on the bar here.
+  M.rightClickTap = hs.eventtap.new({ hs.eventtap.event.types.rightMouseDown }, function(e)
+    if not canvas or not canvas:isShowing() then return false end
+    local pt, bar = e:location(), canvas:frame()
+    if pt.x < bar.x or pt.x > bar.x + bar.w or pt.y < bar.y or pt.y > bar.y + bar.h then return false end
+    local p = profiles[math.floor((pt.x - bar.x) / tabWidth()) + 1]
+    if p then hs.timer.doAfter(0, function() tabMenu(p) end) end
+    return true
+  end):start()
+
   if cfg.scrollSwitch ~= false then
     M.scrollTap = scrollSwitcher():start()
     -- macOS disables an event tap that was too slow; restart it if needed.
@@ -1285,8 +1311,14 @@ function M.resetGroup()
   applyGroup()
 end
 
+-- cliId, or a prefix ending with "*".
 function M.forgetSession(cliId)
-  for _, p in ipairs(profiles) do p.sessions[cliId] = nil end
+  local prefix = cliId:match("^(.*)%*$")
+  for _, p in ipairs(profiles) do
+    for id in pairs(p.sessions) do
+      if id == cliId or (prefix and id:sub(1, #prefix) == prefix) then p.sessions[id] = nil end
+    end
+  end
   saveSessions(); draw()
 end
 
