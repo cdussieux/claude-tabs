@@ -28,6 +28,9 @@ stacks their windows under a tab bar drawn by [Hammerspoon](https://www.hammersp
   🟠 working · 🟢 done and not read yet · 🔴 waiting for you (question or
   permission). A done session leaves the counter when you open it. Totals also
   sit in the menu bar (✳︎).
+- **Plan usage on each tab**: the account's weekly usage and the time to its
+  reset (`Team · 12% · 2d`), orange from 50%, red from 80%, dimmed when the
+  reading is old. The menus add the 5-hour limit.
 - **Behaves like one window**: drag the tab bar to move the group to another
   screen; it fills the screen it is on (`autoFill`), and follows the Dock and
   screens being plugged or woken up. `⌃⌥E` moves it to the next screen.
@@ -112,11 +115,20 @@ All are configurable in `config.lua`.
   (`hammerspoon://claude-tabs?...`). Whether you have read a finished session
   comes from Claude Desktop's own session files (`lastFocusedAt`).
 
+- **Usage**: Claude Desktop saves each usage reading of its account to
+  `plan-usage-history.json` in its data folder; Claude Tabs reads that file (no
+  network, no credentials). Claude only keeps reading in the background while
+  its usage menu (right-click on its menu bar icon) was opened in the last 24 h,
+  so when a tab's numbers go stale and you are idle, Claude Tabs opens that
+  menu for a moment and closes it. Tab menu > "Refresh usage" does it now.
+
 More detail and the pitfalls met on the way: [docs/how-it-works.md](docs/how-it-works.md).
 
 ## Limits
 
 - Only **Code** sessions are counted, not chat conversations.
+- Usage needs Claude's menu bar icon to be visible (not hidden behind the notch
+  or by a menu bar manager); the reset time is rounded by Claude ("2d").
 - `~/.claude` (Claude Code settings, transcripts) is shared by all accounts.
 - macOS only. Thoughts on Linux: [docs/linux.md](docs/linux.md).
 

@@ -61,6 +61,17 @@ return {
   -- A "working" or "waiting" session with no news for this long is forgotten (seconds).
   workingTimeout = 1800,
 
+  -- Each tab shows its account's weekly usage and the time to its reset
+  -- ("Personal · 7% · 2d"), from the readings Claude saves itself. Dimmed
+  -- when older than 40 min.
+  usage = true,
+  -- Claude only keeps reading usage while its usage menu (right-click on its
+  -- menu bar icon) was opened in the last 24 h. With this on, when a tab's
+  -- numbers are stale and you have been idle for usageIdle seconds (screen on
+  -- and unlocked), Claude Tabs opens that menu for a moment and closes it.
+  usageRefresh = true,
+  usageIdle = 120,
+
   -- Path to Claude.app, if it is not found automatically.
   -- claudeApp = "/Applications/Claude.app",
 }

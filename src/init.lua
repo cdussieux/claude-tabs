@@ -159,9 +159,11 @@ local SESSIONS_KEY = "claudeTabs.sessions"
 
 local function nowMs() return math.floor(hs.timer.secondsSinceEpoch() * 1000) end
 
-local function sessionsDir(p)
-  return (p.dataDir or (HOME .. "/Library/Application Support/Claude")) .. "/claude-code-sessions"
+local function dataDir(p)
+  return p.dataDir or (HOME .. "/Library/Application Support/Claude")
 end
+
+local function sessionsDir(p) return dataDir(p) .. "/claude-code-sessions" end
 
 local function findSessionFile(p, cliId)
   if not cliId or not cliId:match("^[%w%-]+$") then return nil end
@@ -441,6 +443,159 @@ function M.makeLaunchers()
 end
 
 ---------------------------------------------------------------------------
+-- Plan usage
+--
+-- Claude itself writes each usage reading of its account to
+-- plan-usage-history.json in its data folder (u.sd = weekly %, u.fh = 5-hour
+-- %). Reading that file costs nothing and needs no credentials. But Claude
+-- only keeps reading in the background (every 5 to 15 min) while its own
+-- usage menu (right-click on its menu bar icon) was opened in the last 24 h.
+-- So when an account's numbers go stale and you are away from the keyboard,
+-- Claude Tabs opens that menu for a moment and closes it (Escape). The menu
+-- also gives the time left before the weekly reset, which the file lacks.
+---------------------------------------------------------------------------
+
+local SHOW_USAGE = cfg.usage ~= false
+local USAGE_REFRESH = SHOW_USAGE and cfg.usageRefresh ~= false
+local USAGE_IDLE = cfg.usageIdle or 120   -- seconds without keyboard or mouse
+local USAGE_STALE = 40 * 60               -- Claude reads at least every 15 min
+local USAGE_RETRY = 30 * 60               -- between two tries for one account
+local RESET_KEY = "claudeTabs.usageReset"
+local resetAt = {}                         -- profile id -> weekly reset (epoch s), estimated
+local pokeAt = {}                          -- profile id -> last try (epoch s)
+
+local function nowS() return hs.timer.secondsSinceEpoch() end
+
+-- Re-read an account's usage file if it changed. Returns true when it did.
+local function readUsage(p)
+  local path = dataDir(p) .. "/plan-usage-history.json"
+  local attr = hs.fs.attributes(path)
+  local mtime = attr and attr.modification or false
+  if mtime == p.usageMtime then return false end
+  p.usageMtime = mtime
+  local s = mtime and readFile(path)
+  local ok, d = pcall(function() return s and hs.json.decode(s) end)
+  local last
+  for _, x in ipairs(ok and type(d) == "table" and type(d.samples) == "table" and d.samples or {}) do
+    if type(x) == "table" and tonumber(x.t) and type(x.u) == "table"
+      and (not last or x.t >= last.t) then last = x end
+  end
+  p.usage = last and { week = tonumber(last.u.sd), five = tonumber(last.u.fh), at = last.t / 1000 } or nil
+  return true
+end
+
+-- "2j", "5h", "<1h"
+local function shortDuration(secs)
+  if secs >= 86400 then return math.floor(secs / 86400) .. S.unitDay end
+  if secs >= 3600 then return math.floor(secs / 3600) .. S.unitHour end
+  return "<1" .. S.unitHour
+end
+
+local function resetIn(p)
+  local t = resetAt[p.id]
+  local now = nowS()
+  if t and t > now then return shortDuration(t - now) end
+end
+
+local function usageStale(p)
+  return not p.usage or nowS() - p.usage.at > USAGE_STALE
+end
+
+-- For the tab: " · 7 % · 2j", with its colour (dimmed when stale).
+local function usageTag(p)
+  if not SHOW_USAGE or not p.usage or not p.usage.week then return nil end
+  local text = "  ·  " .. S.pct:format(p.usage.week)
+  local r = resetIn(p)
+  if r then text = text .. " · " .. r end
+  local color = p.usage.week >= 80 and { hex = "#FF453A" }
+    or p.usage.week >= 50 and { hex = "#F5A623" } or { white = 1 }
+  color.alpha = usageStale(p) and 0.4 or 0.8
+  return text, color
+end
+
+-- For the menus: "semaine 7 % (~2j) · 5 h 3 % · il y a 4 min"
+local function usageDetail(p)
+  if not p.usage then return nil end
+  local parts = {}
+  if p.usage.week then
+    local r = resetIn(p)
+    parts[#parts + 1] = S.usageWeek:format(S.pct:format(p.usage.week)) .. (r and (" (~" .. r .. ")") or "")
+  end
+  if p.usage.five then parts[#parts + 1] = S.usageFive:format(S.pct:format(p.usage.five)) end
+  local age = nowS() - p.usage.at
+  parts[#parts + 1] = age < 60 and S.usageNow
+    or S.usageAge:format(age < 3600 and (math.floor(age / 60) .. " " .. S.unitMin) or shortDuration(age))
+  return table.concat(parts, " · ")
+end
+
+-- Time to the weekly reset, from the open usage menu: a "Weekly · all models"
+-- row followed by "12% · Resets 2d" (or "4h", "2d 5h"…). Rounded by Claude,
+-- so take the middle of the smallest unit.
+local UNITS = { d = 86400, h = 3600, m = 60 }
+local function weeklyResetFromMenu(menu)
+  for _, item in ipairs(menu:attributeValue("AXChildren") or {}) do
+    local group = (item:attributeValue("AXChildren") or {})[1]
+    local texts = {}
+    for _, c in ipairs(group and group:attributeValue("AXChildren") or {}) do
+      local v = c:attributeValue("AXValue")
+      if type(v) == "string" then texts[#texts + 1] = v end
+    end
+    if texts[1] and texts[1]:match("^Weekly") and texts[2] then
+      local rest = texts[2]:match("Resets%s+(.*)")
+      if not rest then return nil end
+      local secs, smallest = 0, nil
+      for n, u in rest:gmatch("(%d+)%s*([dhm])") do
+        secs = secs + tonumber(n) * UNITS[u]
+        smallest = math.min(smallest or math.huge, UNITS[u])
+      end
+      return smallest and (secs + smallest / 2) or nil
+    end
+  end
+end
+
+-- Open this account's usage menu (right-click on its Claude's menu bar icon),
+-- read the reset time, close it. Claude counts that as "menu opened": it
+-- refreshes now and keeps refreshing for 24 h. `done(ok)` is called after.
+local function pokeUsage(p, done)
+  done = done or function() end
+  pokeAt[p.id] = nowS()
+  local app = p.pid and hs.application.applicationForPID(p.pid)
+  local ax = app and hs.axuielement.applicationElement(app)
+  local bar = ax and ax:attributeValue("AXExtrasMenuBar")
+  local icon = bar and (bar:attributeValue("AXChildren") or {})[1]
+  local f = icon and icon:attributeValue("AXFrame")
+  if not f then log.i("usage: no menu bar icon for " .. p.id); return done(false) end
+  local pt = { x = f.x + f.w / 2, y = f.y + f.h / 2 }
+  -- Only click if that spot really shows this Claude's icon (not hidden
+  -- behind the notch, nor covered).
+  local hit = hs.axuielement.systemElementAtPosition(pt)
+  if not hit or hit:pid() ~= p.pid then
+    log.i("usage: menu bar icon of " .. p.id .. " not visible"); return done(false)
+  end
+  local back = hs.mouse.absolutePosition()
+  hs.eventtap.rightClick(pt)
+  hs.timer.doAfter(0.6, function()
+    -- The menu opens under the icon: check it is there before pressing
+    -- Escape, so the key can never reach a window (and stop a session).
+    local e = hs.axuielement.systemElementAtPosition({ x = pt.x, y = f.y + f.h + 20 })
+    local open = e and e:pid() == p.pid and e:attributeValue("AXRole") == "AXMenuItem"
+    if open then
+      local secs = weeklyResetFromMenu(e:attributeValue("AXParent"))
+      if secs then
+        resetAt[p.id] = nowS() + secs
+        hs.settings.set(RESET_KEY, resetAt)
+      end
+      hs.eventtap.keyStroke({}, "escape", 0)
+      log.i("usage: opened the usage menu of " .. p.id)
+    else
+      log.i("usage: menu of " .. p.id .. " did not open")
+    end
+    hs.mouse.absolutePosition(back)
+    done(open)
+  end)
+end
+
+---------------------------------------------------------------------------
 -- Tab bar and menu bar item
 ---------------------------------------------------------------------------
 
@@ -652,14 +807,20 @@ drawBar = function()
     local label = i .. "  " .. p.label
     local st = stateText(p)
     if st ~= "" then label = label .. "  ·  " .. st end
+    local function style(color)
+      return {
+        font = { name = active and "HelveticaNeue-Medium" or "Helvetica Neue", size = 13 },
+        color = color,
+        paragraphStyle = { alignment = "center", lineBreak = "truncateTail" },
+      }
+    end
+    local text = hs.styledtext.new(label, style({ white = 1, alpha = p.pid and 1 or 0.45 }))
+    local tag, tagColor = usageTag(p)
+    if tag then text = text .. hs.styledtext.new(tag, style(tagColor)) end
     els[#els + 1] = {
       type = "text",
       frame = { x = x0 + 12, y = (BAR_H - 17) / 2, w = tabW - 24 - badgesW, h = 18 },
-      text = hs.styledtext.new(label, {
-        font = { name = active and "HelveticaNeue-Medium" or "Helvetica Neue", size = 13 },
-        color = { white = 1, alpha = p.pid and 1 or 0.45 },
-        paragraphStyle = { alignment = "center", lineBreak = "truncateTail" },
-      }),
+      text = text,
     }
     local bx = x0 + tabW - 8 - badgesW + BADGE_GAP
     for _, b in ipairs(badges) do
@@ -708,6 +869,8 @@ local function drawMenubar()
         checked = (p.id == activeId),
         fn = function() M.switchTo(p.id) end,
       }
+      local u = SHOW_USAGE and usageDetail(p)
+      if u then items[#items + 1] = { title = "      " .. u, disabled = true } end
     end
     items[#items + 1] = { title = "-" }
     local active = activeId and byId[activeId]
@@ -880,8 +1043,17 @@ tabMenu = function(p)
     { title = S.menuRename, fn = function() M.renameProfile(p.id) end },
     { title = S.menuRemove, disabled = #profiles <= 1, fn = function() M.removeProfile(p.id) end },
     { title = "-" },
-    { title = S.menuAdd, fn = function() M.addProfile() end },
   }
+  if SHOW_USAGE then
+    local u = usageDetail(p)
+    if u then items[#items + 1] = { title = u, disabled = true } end
+    items[#items + 1] = { title = S.menuUsageRefresh, disabled = not p.pid,
+      fn = function() M.refreshUsage(p.id) end }
+    items[#items + 1] = { title = "-" }
+  end
+  for _, it in ipairs({
+    { title = S.menuAdd, fn = function() M.addProfile() end },
+  }) do items[#items + 1] = it end
   if M.tabPopup then M.tabPopup:delete() end
   M.tabPopup = hs.menubar.new(false)
   M.tabPopup:setMenu(items)
@@ -1253,6 +1425,48 @@ function M.start()
   end)
   for _, p in ipairs(profiles) do watchSessions(p); rescan(p) end
 
+  -- Usage: every minute, re-read the files Claude wrote (a stat each, unless
+  -- they changed). When an account's numbers are stale, and you have been
+  -- away from the keyboard for a while with the screen on, open its usage
+  -- menu (one account per minute, one try per account every 30 min).
+  if SHOW_USAGE then
+    for id, t in pairs(hs.settings.get(RESET_KEY) or {}) do resetAt[id] = tonumber(t) end
+    local screens = { asleep = false, saver = false, locked = false, away = false }
+    local W = hs.caffeinate.watcher
+    local events = {
+      [W.screensDidSleep] = { "asleep", true }, [W.screensDidWake] = { "asleep", false },
+      [W.screensaverDidStart] = { "saver", true }, [W.screensaverDidStop] = { "saver", false },
+      [W.screensDidLock] = { "locked", true }, [W.screensDidUnlock] = { "locked", false },
+      [W.sessionDidResignActive] = { "away", true }, [W.sessionDidBecomeActive] = { "away", false },
+      [W.systemWillSleep] = { "asleep", true }, [W.systemDidWake] = { "asleep", false },
+    }
+    M.screensWatcher = W.new(function(ev)
+      local e = events[ev]
+      if e then screens[e[1]] = e[2] end
+    end):start()
+    local function canPoke()
+      if not USAGE_REFRESH or hs.host.idleTime() < USAGE_IDLE then return false end
+      for _, v in pairs(screens) do if v then return false end end
+      local props = hs.caffeinate.sessionProperties() or {}
+      if props.CGSSessionScreenIsLocked then return false end
+      for _, down in pairs(hs.eventtap.checkMouseButtons()) do if down then return false end end
+      return true
+    end
+    for _, p in ipairs(profiles) do readUsage(p) end
+    M.usageTimer = hs.timer.doEvery(60, function()
+      local changed = false
+      for _, p in ipairs(profiles) do if readUsage(p) then changed = true end end
+      if changed then draw() end
+      if not canPoke() then return end
+      local now = nowS()
+      for _, p in ipairs(profiles) do
+        if p.pid and usageStale(p) and now - (pokeAt[p.id] or 0) > USAGE_RETRY then
+          pokeUsage(p); return
+        end
+      end
+    end)
+  end
+
   -- Right-click on a tab: its menu. The canvas only reports left clicks, so
   -- catch right clicks that land on the bar here.
   M.rightClickTap = hs.eventtap.new({ hs.eventtap.event.types.rightMouseDown }, function(e)
@@ -1332,6 +1546,30 @@ function M.state()
       out[#out + 1] = string.format("   %s %s %s", id:sub(1, 8), s.state,
         s.file and s.file:match("local_[%w%-]+") or "(no file)")
     end
+  end
+  return table.concat(out, "\n")
+end
+
+-- Open an account's usage menu now (tab menu > Refresh usage), then re-read.
+function M.refreshUsage(id)
+  local p = byId[id or activeId]
+  if not p or not p.pid then return false end
+  pokeUsage(p, function()
+    -- Claude writes the file once its request comes back.
+    for _, delay in ipairs({ 1, 3, 8 }) do
+      hs.timer.doAfter(delay, function() if readUsage(p) then draw() end end)
+    end
+  end)
+  return true
+end
+
+function M.usage()
+  local out = {}
+  for _, p in ipairs(profiles) do
+    out[#out + 1] = string.format("%s week=%s five=%s age=%s reset=%s stale=%s",
+      p.id, tostring(p.usage and p.usage.week), tostring(p.usage and p.usage.five),
+      p.usage and math.floor(nowS() - p.usage.at) .. "s" or "-", resetIn(p) or "-",
+      tostring(usageStale(p)))
   end
   return table.concat(out, "\n")
 end

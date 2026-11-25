@@ -51,3 +51,21 @@
   session that finishes while shown in the front window never counts as unread.
 - **Event taps run on Hammerspoon's main thread**: a test that posts mouse
   events in a blocking loop never reaches them; post them from timers.
+
+## Plan usage
+
+- Claude Desktop appends each usage reading of its account to
+  `<data dir>/plan-usage-history.json` (`{"version":2,"samples":[{"t":ms,"org":…,"u":{"fh":5-hour %,"sd":weekly %,…}}]}`),
+  at most one sample every 4.5 min. Plain JSON, unencrypted: Claude Tabs takes
+  the latest sample. No reset time in it.
+- Claude polls usage every 15 min (5 min after you looked at it), but only while
+  its tray usage menu was opened in the last 24 h (`[plan-usage] background poll
+  paused: tray not opened recently` in `main.log`). It also reads once at launch.
+- That menu opens on a **right-click** on Claude's menu bar icon (a left click
+  opens the window). Each instance has its own icon, reachable through the
+  accessibility API (`AXExtrasMenuBar` of the app). Claude Tabs right-clicks it
+  only if `systemElementAtPosition` at that spot belongs to the same pid (icon
+  not hidden), and presses Escape only once an `AXMenuItem` of that pid is
+  under the icon, so the key can never reach a window and stop a session.
+- The open menu's rows read "Weekly · all models" / "12% · Resets 2d": that is
+  where the reset time comes from (rounded by Claude).
