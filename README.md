@@ -38,6 +38,12 @@ stacks their windows under a tab bar drawn by [Hammerspoon](https://www.hammersp
   next one waiting.
   ⌥-click one you won't answer now to drop it until its next turn. The same
   list sits in the menu bar (✳︎).
+- **Session ring**: `⌃⌥⇧⌘R` (from any app, or a mouse button that sends it)
+  opens your 6 latest sessions, all accounts mixed, in a ring around the
+  pointer, each with its state (! waiting for you, ⋯ working, ✓ done). Point
+  at one and click, or press the shortcut again: it opens in its account,
+  which is started first if it is closed. Esc, right-click or the middle closes
+  it. `ringHotkey`, `ringCount` in the config.
 - **Plan usage on each tab**: the account's weekly usage and when it resets
   (`Team · 12% · ↻ Fri 9:00`, or `↻ ~Fri` while the hour is not known yet),
   and a gauge under the tab: the bar is the usage, the tick how much of the
@@ -47,6 +53,16 @@ stacks their windows under a tab bar drawn by [Hammerspoon](https://www.hammersp
 - **Behaves like one window**: drag the tab bar to move the group to another
   screen; it fills the screen it is on (`autoFill`), and follows the Dock and
   screens being plugged or woken up. `⌃⌥E` moves it to the next screen.
+- **Hand a task to another account**: when an account is near its limit, or a
+  task needs a connector only another account has, an agent (or you) runs
+  `claude-tabs handoff --to team|auto "<brief>"`. The other account opens a
+  new session in the same folder with the brief typed in: you read it and
+  press Enter, or with `handoffAutoSend = true` Claude Tabs presses it for you
+  (only once the brief is in the message box and has the focus). `--to auto` picks the account with the most weekly usage
+  left. `claude-tabs accounts` lists the accounts, their usage and your notes
+  (right-click a tab > Notes for agents: "work Gmail, Notion"…). A skill,
+  `claude-tabs-handoff`, tells agents when and how to offer it; the new
+  session reports back to the one that sent it.
 - **`+` button** after the last tab to add an account; **right-click a tab** to
   rename or remove it.
 - **Sign-ins land in the right tab**: the browser's "Open Claude" link goes back
@@ -113,6 +129,7 @@ own sign-in sheet, which answers the right instance directly.
 | `⌃⌥L` | sign-in mode for the current tab, by hand |
 | `⌃⌥N` | open the next session waiting for you (any account) |
 | click a tab's badges | its sessions; click one to open it |
+| `⌃⌥⇧⌘R` (any app) | session ring: your latest sessions around the pointer |
 
 All are configurable in `config.lua`.
 
@@ -129,6 +146,10 @@ All are configurable in `config.lua`.
   the session by walking up its parent processes and tells Hammerspoon
   (`hammerspoon://claude-tabs?...`). Whether you have read a finished session
   comes from Claude Desktop's own session files (`lastFocusedAt`).
+- **Session ring**: lists the newest session files of all accounts by date,
+  reads only their id, title and dates from the text (decoding a ~200 KB file
+  whole is too slow to open at the pointer), and takes each one's state from
+  what the tabs show.
 - **Sessions**: every 30 s, and when Claude rewrites a session file, Claude
   Tabs also reads the session files of the last 24 h (title, and the summary
   Claude writes after each turn: blocked or not, and what it needs from you),
@@ -147,6 +168,13 @@ All are configurable in `config.lua`.
   reading narrows the window, and a drop of the weekly % in the history dates
   the last reset to within minutes (the next one is 7 days later).
 
+- **Hand-off**: `claude-tabs handoff` drops the brief in a file and calls
+  `hammerspoon://claude-tabs-handoff`; Claude Tabs sends Claude's own
+  `claude://code/new?q=<brief>&folder=<folder>` link to the target account's
+  instance (starting it first if it is closed). Messages between sessions
+  already work across accounts: all of them share `~/.claude`, where Claude
+  Code lists its live sessions.
+
 More detail and the pitfalls met on the way: [docs/how-it-works.md](docs/how-it-works.md).
 
 ## Limits
@@ -158,6 +186,8 @@ More detail and the pitfalls met on the way: [docs/how-it-works.md](docs/how-it-
   or by a menu bar manager). Until the last day before a reset, or a reset
   seen in the history, its time is only known to the day (`~Fri`).
 - `~/.claude` (Claude Code settings, transcripts) is shared by all accounts.
+- A hand-off brief is at most 14,000 characters, and the new session sees
+  nothing of the conversation that sent it.
 - macOS only. Thoughts on Linux: [docs/linux.md](docs/linux.md).
 
 ## Tests

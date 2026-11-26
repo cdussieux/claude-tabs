@@ -12,11 +12,11 @@ skip() { printf '  skip  %s\n' "$*"; }
 TMP=$(mktemp -d); trap 'rm -rf "$TMP"' EXIT
 
 echo "Shell"
-for f in install.sh uninstall.sh src/hook.sh scripts/*.sh tests/*.sh; do
+for f in install.sh uninstall.sh src/hook.sh src/claude-tabs scripts/*.sh tests/*.sh; do
   bash -n "$f" && ok "$f" || fail "$f"
 done
 if command -v shellcheck >/dev/null; then
-  shellcheck -S warning install.sh uninstall.sh src/hook.sh scripts/*.sh tests/*.sh && ok shellcheck || fail shellcheck
+  shellcheck -S warning install.sh uninstall.sh src/hook.sh src/claude-tabs scripts/*.sh tests/*.sh && ok shellcheck || fail shellcheck
 else
   skip "shellcheck (not installed)"
 fi
@@ -29,7 +29,7 @@ done
 
 echo "Lua"
 HS=/Applications/Hammerspoon.app/Contents/Frameworks/hs/hs
-for f in src/init.lua src/strings.lua config.example.lua; do
+for f in src/init.lua src/strings.lua src/ring.lua config.example.lua; do
   if pgrep -xq Hammerspoon && [ -x "$HS" ]; then
     for _ in 1 2 3; do  # hs refuses calls for a moment after a reload: retry
       out=$(perl -e 'alarm shift; exec @ARGV' 10 "$HS" -c "local f, e = loadfile('$PWD/$f'); return f and 'ok' or e" 2>&1)

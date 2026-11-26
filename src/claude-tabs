@@ -1,0 +1,128 @@
+#!/bin/bash
+# claude-tabs: hand a task to another of your Claude accounts (Claude Tabs).
+#
+#   claude-tabs accounts
+#       Lists the accounts: running or not, weekly and 5-hour usage, when the
+#       week resets, your notes (connectors…). Marks the account this command
+#       runs in, when it runs inside a Claude session.
+#
+#   claude-tabs handoff [--to <account|auto>] [--folder <dir>] [--from "<session>"] ["<brief>"]
+#       Opens a new Claude Code session in that account, in <dir> (default: the
+#       current folder), with the brief typed in: you read it and press Enter,
+#       or Claude Tabs sends it for you if handoffAutoSend is on in its config.
+#       The brief comes from the argument or stdin.
+#       --to auto (default): the other account with the most weekly usage left.
+#       --from: the sending session's name as other sessions see it; the brief
+#       then asks the new session to report back to it.
+set -uo pipefail
+
+DIR="$HOME/.hammerspoon/claude-tabs"
+ACCOUNTS="$DIR/accounts.tsv"
+HANDOFF="$DIR/handoff"
+
+die() { printf 'claude-tabs: %s\n' "$*" >&2; exit 1; }
+usage() { sed -n '2,16p' "$0" | sed 's/^# \{0,1\}//'; exit "${1:-0}"; }
+
+running() {
+  /usr/bin/pgrep -xq Hammerspoon || die "Hammerspoon is not running."
+  [ -f "$ACCOUNTS" ] || die "no account list yet: is Claude Tabs installed and loaded?"
+}
+
+# The Claude Desktop instance this command runs in (as hook.sh finds it), or nothing.
+own_pid() {
+  local p=$PPID
+  while [ -n "$p" ] && [ "$p" -gt 1 ]; do
+    case "$(/bin/ps -p "$p" -o comm= 2>/dev/null)" in
+      */Claude.app/Contents/MacOS/Claude) echo "$p"; return ;;
+    esac
+    p=$(/bin/ps -p "$p" -o ppid= 2>/dev/null | tr -d ' ')
+  done
+}
+
+enc() { printf '%s' "$1" | perl -pe 's/([^A-Za-z0-9_.~-])/sprintf("%%%02X", ord($1))/ge'; }
+
+accounts() {
+  running
+  local me; me=$(own_pid)
+  printf '%-12s %-12s %-8s %-6s %-6s %-11s %s\n' ACCOUNT LABEL STATE WEEK 5H RESETS NOTES
+  while IFS=$'\t' read -r id label pid week five reset age notes; do
+    [ -n "$id" ] || continue
+    local state=closed mark=""
+    [ "$pid" != - ] && state=running
+    [ -n "$me" ] && [ "$pid" = "$me" ] && mark="  (this session's account)"
+    [ "$week" != - ] && week="$week%"
+    [ "$five" != - ] && five="$five%"
+    [ "$age" != - ] && [ "$age" -ge 40 ] && week="$week?"
+    printf '%-12s %-12s %-8s %-6s %-6s %-11s %s%s\n' "$id" "$label" "$state" "$week" "$five" "$reset" "$notes" "$mark"
+  done < "$ACCOUNTS"
+  echo
+  echo "WEEK/5H: share of the plan used (? = reading over 40 min old). RESETS: weekly reset (~ = day only)."
+}
+
+handoff() {
+  local to=auto folder="$PWD" from="" brief=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --to) to="${2:-}"; shift 2 ;;
+      --folder) folder="${2:-}"; shift 2 ;;
+      --from) from="${2:-}"; shift 2 ;;
+      -h|--help) usage ;;
+      --) shift; brief="$*"; break ;;
+      -*) die "unknown option $1" ;;
+      *) brief="$*"; break ;;
+    esac
+  done
+  [ -n "$brief" ] || [ -t 0 ] || brief=$(cat)
+  [ -n "${brief//[[:space:]]/}" ] || die "no brief: give it as an argument or on stdin."
+  [ -n "$to" ] || die "--to needs an account (or auto)."
+  local abs; abs=$(cd "$folder" 2>/dev/null && pwd -P) || die "not a folder: $folder"; folder=$abs
+  running
+
+  local me fromLabel
+  me=$(own_pid)
+  if [ -n "$from" ]; then
+    fromLabel=$(awk -F'\t' -v p="$me" '$3 == p && p != "" { print $2 }' "$ACCOUNTS")
+    brief="$brief
+
+---
+Handed over by Claude Tabs from the session \"$from\"${fromLabel:+ (account $fromLabel)}. When you are done, send that session a short report with SendMessage (to: \"$from\"), and say in your last message whether it went through."
+  fi
+
+  mkdir -p "$HANDOFF"
+  local id; id="$(date +%s)-$$"
+  printf '%s' "$brief" > "$HANDOFF/$id.prompt"
+  /usr/bin/open -g "hammerspoon://claude-tabs-handoff?id=$id&to=$(enc "$to")&folder=$(enc "$folder")&from=${me:-0}"
+
+  # Up to two minutes: a closed account is started first.
+  local i
+  for i in $(seq 1 240); do
+    if [ -f "$HANDOFF/$id.result" ]; then
+      local status who how
+      status=$(sed -n 1p "$HANDOFF/$id.result"); who=$(sed -n 2p "$HANDOFF/$id.result")
+      how=$(sed -n 3p "$HANDOFF/$id.result")
+      rm -f "$HANDOFF/$id.result"
+      [ "$status" = ok ] || die "$who"
+      echo "Handed over to $who, in $folder."
+      case "$how" in
+        sent) echo "The new session there has started on the brief." ;;
+        typed:*) echo "The brief is typed in a new session there, not sent (${how#typed: }): the user reads it and presses Enter." ;;
+        *) echo "The brief is typed in a new session there, not sent: the user reads it and presses Enter." ;;
+      esac
+      exit 0
+    fi
+    sleep 0.5
+  done
+  rm -f "$HANDOFF/$id.prompt"
+  if [ -f "$HANDOFF/log.txt" ]; then
+    echo "Last steps in $HANDOFF/log.txt:" >&2
+    tail -8 "$HANDOFF/log.txt" >&2
+  fi
+  die "no answer from Claude Tabs (is it loaded? try reloading Hammerspoon)."
+}
+
+case "${1:-}" in
+  accounts) shift; accounts "$@" ;;
+  handoff) shift; handoff "$@" ;;
+  -h|--help|help|"") usage ;;
+  *) usage 1 ;;
+esac

@@ -77,6 +77,22 @@ return {
   usageRefresh = true,
   usageIdle = 120,
 
+  -- Session ring: your latest Code sessions, all accounts mixed, in a ring
+  -- around the pointer; point at one and click (or press the shortcut again)
+  -- to open it in its account. Each slice shows the session's state like the
+  -- tabs (! waiting for you, ⋯ working, ✓ done). Works from any app: a mouse
+  -- button can send the shortcut (Logi Options+, G HUB…).
+  ring = true,
+  ringHotkey = { mods = { "ctrl", "alt", "shift", "cmd" }, key = "R" },
+  ringCount = 6,
+
+  -- `claude-tabs handoff` (an agent handing a task to another account) types
+  -- the brief in a new session there. true = Claude Tabs also presses Enter,
+  -- once the brief is in the message box and nothing else has the focus: the
+  -- agent's brief then becomes your prompt in that account without you
+  -- reading it first.
+  handoffAutoSend = false,
+
   -- Path to Claude.app, if it is not found automatically.
   -- claudeApp = "/Applications/Claude.app",
 }

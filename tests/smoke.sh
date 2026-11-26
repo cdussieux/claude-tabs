@@ -45,6 +45,17 @@ echo "Layout"
 [ "$(q 'return ClaudeTabs.layoutOk()')" = true ] && ok "bar and front window in place" \
   || fail "layout: $(q 'return ClaudeTabs.geometry()')"
 
+echo "Session ring"
+n=$(q 'return ClaudeTabs.ring and ClaudeTabs.ring.text() or "none"' | grep -c '^[0-9]')
+[ "$n" -ge 1 ] && ok "ring lists $n session(s)" || fail "ring: $(q 'return ClaudeTabs.ring and ClaudeTabs.ring.text() or "none"' | head -3)"
+
+echo "Hand-off command"
+CT="$HOME/.hammerspoon/claude-tabs/claude-tabs"
+n=$("$CT" accounts 2>/dev/null | awk 'NR > 1 && NF >= 3 && $3 ~ /running|closed/' | wc -l | tr -d ' ')
+[ "$n" -ge 1 ] && ok "accounts lists $n account(s)" || fail "accounts: $("$CT" accounts 2>&1 | head -3)"
+out=$("$CT" handoff --to no-such-account "test" 2>&1)
+case "$out" in *"unknown account"*) ok "unknown account refused" ;; *) fail "handoff: $out" ;; esac
+
 echo "claude:// handler"
 h=$(osascript -l JavaScript "$HOME/.hammerspoon/claude-tabs/url-handler.js" get 2>&1)
 [ "$h" = com.anthropic.claudefordesktop ] && ok "Claude handles claude:// links" || fail "handler is $h"

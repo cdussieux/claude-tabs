@@ -4,10 +4,11 @@
 
 | Where | What |
 |---|---|
-| `~/.hammerspoon/claude-tabs/` | the module (`init.lua`, `strings.lua`), `config.lua`, `profiles.json` (the tabs), `hook.sh`, `send-url.js`, `url-handler.js` |
+| `~/.hammerspoon/claude-tabs/` | the module (`init.lua`, `strings.lua`), `config.lua`, `profiles.json` (the tabs), `hook.sh`, `send-url.js`, `url-handler.js`, the `claude-tabs` command, `accounts.tsv` (what `claude-tabs accounts` reads) and `handoff/` (briefs on their way) |
 | `~/.hammerspoon/init.lua` | a block between `-- >>> claude-tabs` and `-- <<< claude-tabs` that loads it |
 | `~/Applications/Claude Tabs/` | one launcher per account, and `Claude Tabs Link Router.app` |
 | `~/.claude/settings.json` | the hooks (first backup: `settings.json.bak-claude-tabs`) |
+| `~/.claude/skills/claude-tabs-handoff/` | the hand-off skill, read by every account's Claude Code |
 | `~/.claude-profiles/<id>/` | each extra account's Claude data folder (sign-in, Code sessions) |
 
 ## Pitfalls met on the way
@@ -122,3 +123,70 @@ link. To check from a terminal:
 hs -c 'return ClaudeTabs.sessions()'        # what each tab shows
 hs -c 'return ClaudeTabs.menuText("queue")' # the red button's menu (or a tab's id)
 ```
+
+## Hand-off between accounts
+
+What every account shares, because Claude Code runs with the same `~/.claude`:
+`CLAUDE.md`, skills, memory, settings, hooks, transcripts, and the list of live
+sessions (`~/.claude/sessions/<pid>.json`, with one socket each in
+`/tmp/cc-socks`). That list is what Claude Code's own messages between
+sessions use, so a session can already message one in another account. What
+is not shared lives on claude.ai: connectors, chats, artifacts, usage limits.
+
+So Claude Tabs does not carry messages. It starts work in another account:
+
+1. `claude-tabs handoff` writes the brief to `handoff/<id>.prompt` and opens
+   `hammerspoon://claude-tabs-handoff?id=…&to=…&folder=…&from=<Claude pid>`
+   (the pid of the instance it runs in, found like `hook.sh` does).
+2. Claude Tabs picks the account (`auto`: the most weekly usage left, other
+   than the sender's; one past 90 % of its 5-hour limit comes after the
+   others), starts it if needed, and sends it
+   `claude://code/new?q=<brief>&folder=<folder>`: Claude's own link for a new
+   Code session, the one its Finder service uses. The prompt is typed in, not
+   sent; Claude keeps its first 14,336 characters.
+3. With `handoffAutoSend = true`, Claude Tabs then presses Enter for you,
+   through macOS accessibility (it asks Electron to expose its interface with
+   `AXManualAccessibility`). It waits up to 25 s until a text area of that
+   account holds the brief, the account is in front, that text area has the
+   focus and you have not touched keyboard or mouse for 1 s; then it checks the text area
+   emptied. Anything else in front, such as a "trust this folder?" prompt,
+   and the brief stays typed for you: it never presses Enter on something
+   else.
+4. The answer goes to `handoff/<id>.result`, which the command waits for:
+   `ok`, the account, then `sent` or `typed: <why not>`.
+
+Without auto-send the brief stays a prompt you send yourself: a message from
+another session is only a teammate's request to the agent that gets it, while
+a prompt you send is your instruction. With auto-send, the agent's brief gets
+that weight without you reading it: keep it for agents you trust to ask you
+first (the skill tells them to). With `--from "<session name>"`, the brief ends by asking the new
+session to report back to the sender.
+
+```bash
+~/.hammerspoon/claude-tabs/claude-tabs accounts
+~/.hammerspoon/claude-tabs/claude-tabs handoff --to perso "Say hello"
+```
+
+## Session ring
+
+`src/ring.lua`, built by `init.lua` with what it needs (the list, how to open
+a session, colours). The list: every account's `local_*.json` sorted by date,
+then the newest ones read until `ringCount` are not archived, sorted by
+`lastActivityAt`. The ring started as its own Hammerspoon module and opened in
+~380 ms: decoding the whole file (~200 KB, with dozens of nested `"title"`
+keys from MCP tools). It now reads `sessionId`, `isArchived`,
+`lastActivityAt` and the session's title (the `"title"` just before
+`"titleSource"`) from the text, cached by date, and decodes the whole file
+only when that fails. The state comes from what the tabs already computed.
+
+The ring is a canvas at the pointer, moved back inside the screen near an
+edge. While it is open an event tap swallows clicks (a click never reaches
+the window under it); Esc, right-click or the middle closes it. Opening a
+session in a closed account starts that account first, waits for its window,
+then sends `claude://code/continue?session=…`.
+
+```bash
+hs -c 'return ClaudeTabs.ring.text()'                 # the slices, clockwise
+hs -c 'return ClaudeTabs.ring.snapshot("/tmp/r.png", 2)' # a picture, slice 2 lit
+```
+

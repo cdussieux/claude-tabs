@@ -10,6 +10,7 @@ DEST="$HSDIR/claude-tabs"
 APPS="$HOME/Applications/Claude Tabs"
 ROUTER="$APPS/Claude Tabs Link Router.app"
 SETTINGS="$HOME/.claude/settings.json"
+SKILL="$HOME/.claude/skills/claude-tabs-handoff"
 HS=/Applications/Hammerspoon.app/Contents/Frameworks/hs/hs
 LSREGISTER=/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister
 PURGE=0
@@ -23,6 +24,9 @@ fi
 
 # Hooks
 [ -f "$SETTINGS" ] && osascript -l JavaScript "$SRC/scripts/claude-settings.js" remove "$SETTINGS" "" >/dev/null
+
+# Hand-off skill
+rm -rf "$SKILL"
 
 # Loader block in ~/.hammerspoon/init.lua
 if [ -f "$HSDIR/init.lua" ]; then
@@ -53,7 +57,7 @@ fi
 # Saved state (group position, session counters) and reload
 if pgrep -xq Hammerspoon; then
   if [ "$PURGE" = 1 ]; then
-    hsq 'for _, k in ipairs({"claudeTabs.groupFrame", "claudeTabs.sessions"}) do hs.settings.clear(k) end' >/dev/null || true
+    hsq 'for _, k in ipairs({"claudeTabs.groupFrame", "claudeTabs.sessions", "claudeTabs.dismissed", "claudeTabs.folded"}) do hs.settings.clear(k) end' >/dev/null || true
   fi
   hsq 'hs.reload()' >/dev/null || true
 fi

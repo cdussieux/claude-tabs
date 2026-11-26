@@ -4,6 +4,8 @@
 #  - a block that loads it in ~/.hammerspoon/init.lua
 #  - the "Claude Tabs Link Router" app in ~/Applications/Claude Tabs
 #  - the Claude Code hooks in ~/.claude/settings.json (backed up once first)
+#  - the claude-tabs command and its skill (~/.claude/skills/claude-tabs-handoff),
+#    for handing a task to another account
 set -euo pipefail
 
 SRC="$(cd "$(dirname "$0")" && pwd)"
@@ -12,6 +14,7 @@ DEST="$HSDIR/claude-tabs"
 APPS="$HOME/Applications/Claude Tabs"
 ROUTER="$APPS/Claude Tabs Link Router.app"
 SETTINGS="$HOME/.claude/settings.json"
+SKILL="$HOME/.claude/skills/claude-tabs-handoff"
 LSREGISTER=/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister
 
 say() { printf '%s\n' "$*"; }
@@ -25,9 +28,9 @@ has_app com.anthropic.claudefordesktop || die "Claude Desktop is not installed: 
 # 1. The module (if it is already loaded, copying its files reloads it by itself)
 ALREADY=0; [ -f "$DEST/init.lua" ] && ALREADY=1
 mkdir -p "$DEST"
-cp "$SRC"/src/init.lua "$SRC"/src/strings.lua "$SRC"/src/hook.sh \
-   "$SRC"/src/send-url.js "$SRC"/src/url-handler.js "$DEST"/
-chmod +x "$DEST/hook.sh"
+cp "$SRC"/src/init.lua "$SRC"/src/strings.lua "$SRC"/src/ring.lua "$SRC"/src/hook.sh \
+   "$SRC"/src/send-url.js "$SRC"/src/url-handler.js "$SRC"/src/claude-tabs "$DEST"/
+chmod +x "$DEST/hook.sh" "$DEST/claude-tabs"
 if [ ! -f "$DEST/config.lua" ]; then
   cp "$SRC/config.example.lua" "$DEST/config.lua"
   say "Created $DEST/config.lua: edit it to list your accounts."
@@ -73,7 +76,11 @@ mkdir -p "$(dirname "$SETTINGS")"
 [ -f "$SETTINGS.bak-claude-tabs" ] || cp "$SETTINGS" "$SETTINGS.bak-claude-tabs"
 osascript -l JavaScript "$SRC/scripts/claude-settings.js" add "$SETTINGS" "$DEST/hook.sh" >/dev/null
 
-# 5. (Re)load
+# 5. The hand-off skill (every account's Claude Code reads ~/.claude/skills)
+mkdir -p "$SKILL"
+cp "$SRC/src/skill/SKILL.md" "$SKILL/SKILL.md"
+
+# 6. (Re)load
 HS=/Applications/Hammerspoon.app/Contents/Frameworks/hs/hs
 # `hs` has no real time limit and hangs if Hammerspoon is busy reloading: cap it.
 hsq() { perl -e 'alarm shift; exec @ARGV' 8 "$HS" -c "$1" 2>/dev/null; }
@@ -89,4 +96,5 @@ fi
 
 say "Claude Tabs installed in $DEST"
 say "Hooks added to $SETTINGS (first backup: $SETTINGS.bak-claude-tabs)"
+say "Hand-off: $DEST/claude-tabs, skill in $SKILL"
 say "First time? Give Hammerspoon Accessibility access: System Settings > Privacy & Security > Accessibility."

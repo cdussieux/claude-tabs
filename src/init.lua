@@ -58,6 +58,7 @@ local function newProfile(p, i)
   return {
     id = p.id, label = p.label or p.id, color = p.color or PALETTE[(i - 1) % #PALETTE + 1],
     rawDataDir = p.dataDir, dataDir = expand(p.dataDir), index = i,
+    notes = p.notes,  -- for agents: what this account has (connectors…), see `claude-tabs accounts`
     pid = nil,
     sessions = {},  -- cliSessionId -> { state = "working"|"done"|"attention", at = ms, file = path }
   }
@@ -69,7 +70,7 @@ local function loadProfileList()
   if ok and type(list) == "table" and #list > 0 then return list end
   list = {}
   for _, p in ipairs(cfg.profiles or { { id = "main", label = "Claude" } }) do
-    list[#list + 1] = { id = p.id, label = p.label, color = p.color, dataDir = p.dataDir }
+    list[#list + 1] = { id = p.id, label = p.label, color = p.color, dataDir = p.dataDir, notes = p.notes }
   end
   writeFile(PROFILES_FILE, hs.json.encode(list, true))
   return list
@@ -84,7 +85,7 @@ end
 local function saveProfileList()
   local list = {}
   for _, p in ipairs(profiles) do
-    list[#list + 1] = { id = p.id, label = p.label, color = p.color, dataDir = p.rawDataDir }
+    list[#list + 1] = { id = p.id, label = p.label, color = p.color, dataDir = p.rawDataDir, notes = p.notes }
   end
   writeFile(PROFILES_FILE, hs.json.encode(list, true))
 end
@@ -437,6 +438,79 @@ local function buildViews()
   for _, p in ipairs(profiles) do buildView(p) end
 end
 
+-- The latest sessions, all accounts mixed, for the session ring. Session
+-- files weigh ~200 KB and hold dozens of nested "title" keys: decoding them
+-- whole took ~380 ms for the ring, so this reads the few fields it needs
+-- from the text (the session's own title is the one just before
+-- "titleSource"), cached by date, with a full decode when that fails.
+local quickCache = {}
+
+local function quickInfo(path, mt)
+  local c = quickCache[path]
+  if c and c.mt == mt then return c.info end
+  local s = readFile(path) or ""
+  local info
+  local id = s:match('"sessionId":"(local_[^"]+)"')
+  local stop = id and s:find(',"titleSource"', 1, true)
+  if stop then
+    local chunk, start = s:sub(math.max(1, stop - 4000), stop - 1), nil
+    local i = 1
+    while true do
+      local j = chunk:find('"title":"', i, true)
+      if not j then break end
+      start, i = j, j + 1
+    end
+    local ok, v = pcall(hs.json.decode, start and ("[" .. chunk:sub(start + 8) .. "]") or "")
+    if ok and type(v) == "table" and type(v[1]) == "string" then
+      info = { id = id, title = v[1], archived = s:find('"isArchived":true', 1, true) ~= nil,
+        activity = tonumber(s:match('"lastActivityAt":(%d+)')) }
+    end
+  end
+  if not info then
+    local ok, d = pcall(hs.json.decode, s)
+    if ok and type(d) == "table" and nonEmpty(d.sessionId) then
+      info = { id = d.sessionId, archived = d.isArchived == true, activity = tonumber(d.lastActivityAt),
+        title = nonEmpty(d.title) or (nonEmpty(d.cwd) and d.cwd:match("([^/]+)/?$")) or "?" }
+    end
+  end
+  quickCache[path] = { mt = mt, info = info }
+  return info
+end
+
+function M.recentSessions(n)
+  local files = {}
+  for _, p in ipairs(profiles) do
+    local root = sessionsDir(p)
+    for _, a in ipairs(listDir(root)) do
+      for _, o in ipairs(listDir(root .. "/" .. a)) do
+        local dir = root .. "/" .. a .. "/" .. o
+        for _, name in ipairs(listDir(dir)) do
+          if name:match("^local_.+%.json$") then
+            local path = dir .. "/" .. name
+            local mt = mtime(path)
+            if mt then files[#files + 1] = { path = path, mt = mt, p = p } end
+          end
+        end
+      end
+    end
+  end
+  table.sort(files, function(a, b) return a.mt > b.mt end)
+  local out = {}
+  for _, f in ipairs(files) do
+    if #out >= n then break end
+    local info = quickInfo(f.path, f.mt)
+    if info and not info.archived then
+      local e = { id = info.id, title = info.title, at = info.activity or f.mt * 1000, p = f.p }
+      for _, v in ipairs(f.p.view or {}) do
+        if v.id == info.id then e.state = v.state end
+      end
+      out[#out + 1] = e
+    end
+  end
+  table.sort(out, function(a, b) return a.at > b.at end)
+  return out
+end
+
 ---------------------------------------------------------------------------
 -- Layout: where the bar and the windows go
 ---------------------------------------------------------------------------
@@ -585,6 +659,27 @@ local function launch(p)
   if p.dataDir then hs.execute("mkdir -p " .. shq(p.dataDir)) end
   log.i("launching profile " .. p.id)
   hs.execute(launchCommand(p))
+end
+
+-- Run fn once the account has a window, starting it first if it is closed
+-- (then a few seconds more for Claude to load). failed() after 45 s.
+local startWaits = {}
+local function whenRunning(p, fn, failed)
+  refresh()
+  if p.pid and profileWindow(p) then fn(); return end
+  if not p.pid then launch(p) end
+  local key, tries = {}, 0
+  startWaits[key] = hs.timer.doEvery(1, function()
+    tries = tries + 1
+    refresh()
+    if p.pid and profileWindow(p) then
+      startWaits[key]:stop()
+      startWaits[key] = hs.timer.doAfter(4, function() startWaits[key] = nil; fn() end)
+    elseif tries >= 45 then
+      startWaits[key]:stop(); startWaits[key] = nil
+      if failed then failed() end
+    end
+  end)
 end
 
 -- ~/Applications/Claude Tabs/Claude <Label>.app, for Spotlight and the Dock.
@@ -1094,9 +1189,11 @@ end
 function M.openSession(profileId, sessionId)
   local p = byId[profileId]
   if not p then return end
-  refresh()
-  if not sessionId or not p.pid then M.switchTo(p.id); return end
-  M.sendLink("claude://code/continue?session=" .. sessionId, p.id, true)
+  if not sessionId then M.switchTo(p.id); return end
+  -- A closed account is started first, then the session opened in it.
+  whenRunning(p, function()
+    M.sendLink("claude://code/continue?session=" .. sessionId, p.id, true)
+  end, function() hs.alert.show(S.notRunning) end)
 end
 
 -- Drop a waiting session from the lists until its next turn.
@@ -1454,9 +1551,241 @@ menubarItems = function(reopen)
   return items
 end
 
+---------------------------------------------------------------------------
+-- Hand-off to another account (`claude-tabs handoff`, src/claude-tabs)
+---------------------------------------------------------------------------
+-- The command writes the brief to HANDOFF_DIR/<id>.prompt and calls
+-- hammerspoon://claude-tabs-handoff?id=…&to=…&folder=…&from=<Claude pid>.
+-- Claude Tabs sends claude://code/new?q=<brief>&folder=<folder> to the target
+-- account: a new session in that folder with the brief typed in, not sent (you
+-- read it and press Enter). The outcome goes to HANDOFF_DIR/<id>.result.
+-- ACCOUNTS_FILE lists the accounts for `claude-tabs accounts`.
+
+local HANDOFF_DIR = DIR .. "/handoff"
+local ACCOUNTS_FILE = DIR .. "/accounts.tsv"
+local PROMPT_MAX = 14000  -- Claude keeps the first 14336 characters of a code/new link's prompt
+local HANDOFF_LOG = HANDOFF_DIR .. "/log.txt"
+
+-- Each step of a hand-off, also in handoff/log.txt (`claude-tabs` shows its
+-- end when a hand-off fails), cut back when it passes 64 KB.
+local function hlog(msg)
+  log.i("hand-off: " .. msg)
+  local attrs = hs.fs.attributes(HANDOFF_LOG)
+  local f = io.open(HANDOFF_LOG, attrs and attrs.size > 65536 and "w" or "a")
+  if f then f:write(os.date("%H:%M:%S "), msg, "\n"); f:close() end
+end
+
+local function urlencode(str)
+  return (str:gsub("[^%w%-%._~]", function(c) return ("%%%02X"):format(c:byte()) end))
+end
+
+local function oneLine(str) return (tostring(str or ""):gsub("[\t\r\n]+", " ")) end
+
+-- One line per account, tab-separated, in English (read by agents):
+-- id, label, pid or -, weekly %, 5-hour %, weekly reset, minutes since the reading, notes.
+local function writeAccounts()
+  local lines = {}
+  for _, p in ipairs(profiles) do
+    local u = p.usage
+    local reset = "-"
+    local mid, width = resetInfo(p)
+    if mid then
+      reset = width <= 3 * 3600 and os.date("%a %H:00", math.floor(mid + 1800)) or ("~" .. os.date("%a", math.floor(mid)))
+    end
+    lines[#lines + 1] = table.concat({
+      p.id, oneLine(p.label), p.pid and tostring(math.tointeger(p.pid)) or "-",
+      u and u.week and tostring(math.floor(u.week)) or "-",
+      u and u.five and tostring(math.floor(u.five)) or "-",
+      reset, u and tostring(math.floor((nowS() - u.at) / 60)) or "-",
+      p.notes and oneLine(p.notes) or "",
+    }, "\t")
+  end
+  local text = table.concat(lines, "\n") .. "\n"
+  if text ~= M.accountsText then
+    M.accountsText = text
+    writeFile(ACCOUNTS_FILE, text)
+  end
+end
+
+-- "auto": the account with the most weekly usage left, other than `from`;
+-- one near its 5-hour limit comes after the others, one never read comes last.
+local function pickAuto(from)
+  local best, bestScore
+  for _, p in ipairs(profiles) do
+    if p ~= from then
+      local u = p.usage
+      local score = (u and u.week) or 200
+      if u and u.five and u.five >= 90 then score = score + 100 end
+      if not bestScore or score < bestScore then best, bestScore = p, score end
+    end
+  end
+  return best
+end
+
+-- Auto-send (config.handoffAutoSend): press Enter in the new session for you,
+-- but only once its message box holds the brief and has the focus, the
+-- account is in front, and you have not typed for a moment. Anything else in
+-- front (a "trust this folder?" prompt…) and the brief stays typed for you.
+local AUTO_SEND_WAIT = 25  -- seconds
+
+local function squash(str) return (str:gsub("%s+", " "):gsub("^ ", "")) end
+
+-- The element that has the focus in the account, when it is a text area
+-- holding the brief. One accessibility call, not a walk of the window: with
+-- its interface exposed, Claude's tree holds the whole conversation, and
+-- walking it would freeze Hammerspoon.
+local function focusedBrief(ax, head)
+  local f = ax:attributeValue("AXFocusedUIElement")
+  if not f then return nil, "nothing" end
+  local role = f:attributeValue("AXRole")
+  if role ~= "AXTextArea" then return nil, tostring(role) end
+  local v = f:attributeValue("AXValue")
+  if type(v) ~= "string" or not squash(v):find(head, 1, true) then return nil, "an empty or other text area" end
+  return f
+end
+
+-- done(sent, why): sent = true when Enter went in and the brief left the box.
+local function autoSend(p, prompt, done)
+  local app = p.pid and hs.application.applicationForPID(p.pid)
+  if not app then return done(false, "account not running") end
+  local ax = hs.axuielement.applicationElement(app)
+  ax:setTimeout(1)  -- never wait long on a busy Claude
+  ax:setAttributeValue("AXManualAccessibility", true)  -- Electron exposes its UI to accessibility on request
+  local head = squash(prompt):sub(1, 60)
+  local start, why, logged = os.time(), "the brief did not show up", nil
+  local timer, searching, seen, gone
+  local function waitFor(reason)
+    why = reason
+    if reason ~= logged then hlog("auto-send waits: " .. reason); logged = reason end
+  end
+  hlog("auto-send: waiting for the brief in " .. p.label)
+  local tick
+  timer = hs.timer.doEvery(0.5, function()
+    local ok, err = pcall(tick)
+    if not ok then
+      timer:stop()
+      if type(searching) == "userdata" then pcall(function() searching:cancel() end) end
+      hlog("auto-send error: " .. tostring(err))
+      done(false, "error: " .. tostring(err))
+    end
+  end)
+  tick = function()
+    if os.time() - start > AUTO_SEND_WAIT then
+      timer:stop()
+      if type(searching) == "userdata" then pcall(function() searching:cancel() end) end
+      return done(false, why)
+    end
+    if gone then  -- the brief was in the box, and left it: someone sent it
+      timer:stop()
+      hlog("auto-send: the brief was sent by someone else")
+      return done(true)
+    end
+    if not isFrontmost(p) then return waitFor(p.label .. " was not in front") end
+    local box, other = focusedBrief(ax, head)
+    if box then seen = true end
+    if not box then
+      -- Look for the message box holding the brief and give it the focus.
+      -- elementSearch walks the window a bit at a time without blocking.
+      if not searching then
+        local win = ax:attributeValue("AXFocusedWindow")
+        if win then
+          hlog("auto-send: searching the window for the message box")
+          local token = {}
+          searching = token
+          local obj = win:elementSearch(function(msg, found)
+            searching = nil
+            local area = found and found[1]
+            hlog("auto-send: search " .. tostring(msg) .. ", " .. (area and "box found, focusing it" or "no box"))
+            if area then seen = true; area:setAttributeValue("AXFocused", true)
+            elseif seen and msg == "completed" then gone = true end
+          end, function(e)
+            if e:attributeValue("AXRole") ~= "AXTextArea" then return false end
+            local v = e:attributeValue("AXValue")
+            return type(v) == "string" and squash(v):find(head, 1, true) ~= nil
+          end, { count = 1 })
+          if searching == token then searching = obj end  -- (unless the search already ended)
+        end
+      end
+      return waitFor("the focus in " .. p.label .. " was on " .. other .. ", not on the brief")
+    end
+    if hs.host.idleTime() < 1 then return waitFor("you were using the keyboard or mouse") end
+    timer:stop()
+    hlog("auto-send: pressing Enter in " .. p.label)
+    hs.eventtap.keyStroke({}, "return", 20000, app)
+    hs.timer.doAfter(1.5, function()
+      local v = box:attributeValue("AXValue")
+      local still = type(v) == "string" and squash(v):find(head, 1, true)
+      done(not still, still and "Enter did not send it" or nil)
+    end)
+  end
+end
+
+local function findAccount(name)
+  name = (name or ""):lower()
+  for _, p in ipairs(profiles) do
+    if p.id:lower() == name or p.label:lower() == name then return p end
+  end
+end
+
+local function onHandoff(_, params)
+  local id = params.id
+  if not id or not id:match("^[%w%-]+$") then return end
+  local function result(ok, text)
+    hlog(id .. " " .. (ok and "ok: " or "error: ") .. text:gsub("\n", " / "))
+    writeFile(HANDOFF_DIR .. "/" .. id .. ".result", (ok and "ok\n" or "error\n") .. text .. "\n")
+  end
+  hlog(id .. " received: to=" .. tostring(params.to) .. " folder=" .. tostring(params.folder))
+  local promptFile = HANDOFF_DIR .. "/" .. id .. ".prompt"
+  local prompt = readFile(promptFile)
+  os.remove(promptFile)
+  if not prompt or not prompt:find("%S") then return result(false, "empty brief") end
+  local len = utf8.len(prompt) or #prompt
+  if len > PROMPT_MAX then
+    return result(false, ("brief too long: %d characters, at most %d"):format(len, PROMPT_MAX))
+  end
+  local folder = params.folder or ""
+  local attrs = folder:sub(1, 1) == "/" and hs.fs.attributes(folder)
+  if not attrs or attrs.mode ~= "directory" then return result(false, "not a folder: " .. folder) end
+  refresh()
+  local from = pidProfile(tonumber(params.from))
+  local p
+  if (params.to or "auto") == "auto" then p = pickAuto(from) else p = findAccount(params.to) end
+  if not p then
+    local names = {}
+    for _, q in ipairs(profiles) do names[#names + 1] = q.id end
+    return result(false, "unknown account \"" .. tostring(params.to) .. "\" (accounts: " .. table.concat(names, ", ") .. ")")
+  end
+  local url = "claude://code/new?q=" .. urlencode(prompt) .. "&folder=" .. urlencode(folder)
+  local function send()
+    if M.sendLink(url, p.id, true) then
+      hlog("link sent to " .. p.id .. " in " .. folder)
+      local who = p.label .. " (" .. p.id .. ")"
+      if not cfg.handoffAutoSend then
+        hs.alert.show(S.handoffReady:format(p.label), 6)
+        return result(true, who .. "\ntyped")
+      end
+      autoSend(p, prompt, function(sent, why)
+        if sent then
+          log.i("hand-off sent in " .. p.id)
+          hs.alert.show(S.handoffStarted:format(p.label), 4)
+          result(true, who .. "\nsent")
+        else
+          log.w("hand-off not sent in " .. p.id .. ": " .. tostring(why))
+          hs.alert.show(S.handoffReady:format(p.label), 6)
+          result(true, who .. "\ntyped: " .. tostring(why))
+        end
+      end)
+    else
+      result(false, "could not send the link to " .. p.label)
+    end
+  end
+  whenRunning(p, send, function() result(false, p.label .. " did not start") end)
+end
+
 draw = function()
   drawBar()
   drawMenubar()
+  writeAccounts()
 end
 
 ---------------------------------------------------------------------------
@@ -1572,6 +1901,24 @@ function M.renameProfile(id, label)
   draw()
 end
 
+-- Notes for agents (`claude-tabs accounts`): what this account has that the
+-- others don't, such as its connectors. notes = "" clears them.
+function M.editNotes(id, notes)
+  local p = byId[id]
+  if not p then return end
+  if notes == nil then
+    hs.focus()
+    local button, text = hs.dialog.textPrompt(S.notesTitle:format(p.label), S.notesPrompt,
+      p.notes or "", S.notesButton, S.cancel)
+    if button ~= S.notesButton then return end
+    notes = text
+  end
+  notes = trim(notes or "")
+  p.notes = notes ~= "" and notes or nil
+  saveProfileList()
+  draw()
+end
+
 -- Removes the tab (and quits its Claude). Its data folder is kept.
 function M.removeProfile(id, confirmed)
   local p = byId[id]
@@ -1605,6 +1952,7 @@ tabMenuItems = function(p, reopen)
   for _, it in ipairs({
     { title = S.menuSignInTab, fn = function() M.startSignIn(p.id) end },
     { title = S.menuRename, fn = function() M.renameProfile(p.id) end },
+    { title = S.menuNotes, fn = function() M.editNotes(p.id) end },
     { title = S.menuRemove, disabled = #profiles <= 1, fn = function() M.removeProfile(p.id) end },
     { title = "-" },
   }) do items[#items + 1] = it end
@@ -2066,6 +2414,15 @@ function M.start()
   M.hotkeys[#M.hotkeys + 1] = hs.hotkey.bind(MODS, "F", function() M.fillScreen() end)
   M.hotkeys[#M.hotkeys + 1] = hs.hotkey.bind(MODS, "E", function() M.nextScreen() end)
   M.hotkeys[#M.hotkeys + 1] = hs.hotkey.bind(MODS, "N", function() M.nextWaiting() end)
+  if cfg.ring ~= false then
+    M.ring = dofile(DIR .. "/ring.lua")({
+      entries = function() return M.recentSessions(cfg.ringCount or 6) end,
+      open = function(e) M.openSession(e.p.id, e.id) end,
+      colors = COLORS, glyphs = GLYPHS, ago = agoText, empty = S.ringEmpty,
+    })
+    local hk = cfg.ringHotkey or { mods = { "ctrl", "alt", "shift", "cmd" }, key = "R" }
+    M.hotkeys[#M.hotkeys + 1] = hs.hotkey.bind(hk.mods, hk.key, function() M.ring.toggle() end)
+  end
   M.hotkeys[#M.hotkeys + 1] = hs.hotkey.bind(MODS, "L", function()
     if signInTarget then M.stopSignIn(); hs.alert.show(S.signInStopped)
     else M.startSignIn() end
@@ -2073,6 +2430,8 @@ function M.start()
 
   hs.urlevent.bind("claude-tabs", onHookEvent)
   hs.urlevent.bind("claude-tabs-link", onRouterLink)
+  hs.urlevent.bind("claude-tabs-handoff", onHandoff)
+  hs.fs.mkdir(HANDOFF_DIR)
   M.logWatcher = watchClaudeLog()
   -- If Hammerspoon restarted during sign-in mode, give claude:// links back to Claude.
   if urlHandler("get") == ROUTER_ID then urlHandler("set", BUNDLE) end
