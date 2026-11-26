@@ -74,3 +74,7 @@
   whole weeks, and starts over if a new one does not fit (schedule changed).
 - The history gives the other clue: the weekly % only grows until the reset,
   so a drop between two readings a few minutes apart dates it.
+- If you know an account's exact reset from elsewhere (claude.ai usage
+  settings, a Claude session's usage tool), give it once:
+  `hs -c 'ClaudeTabs.setReset("<id>", <epoch seconds>)'`. It holds for the
+  following weeks.

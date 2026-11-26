@@ -1687,6 +1687,18 @@ function M.refreshUsage(id)
   return true
 end
 
+-- Give an account's exact weekly reset (epoch seconds), when you know it from
+-- elsewhere (Claude's usage settings page, a session's usage tool). It holds
+-- for the following weeks too.
+function M.setReset(id, t)
+  local p = byId[id]
+  if not p or not tonumber(t) then return false end
+  resetWin[p.id] = nil
+  addResetClue(p, t - 60, t + 60)
+  draw()
+  return true
+end
+
 function M.usage()
   local out = {}
   for _, p in ipairs(profiles) do
