@@ -68,4 +68,9 @@
   not hidden), and presses Escape only once an `AXMenuItem` of that pid is
   under the icon, so the key can never reach a window and stop a session.
 - The open menu's rows read "Weekly · all models" / "12% · Resets 2d": that is
-  where the reset time comes from (rounded by Claude).
+  where the reset time comes from. Claude rounds it down ("3d" was 3 d 17 h),
+  in hours on the last day. Each reading is a window ("between 3 and 4 days
+  from now"); Claude Tabs keeps the intersection of the windows, moved by
+  whole weeks, and starts over if a new one does not fit (schedule changed).
+- The history gives the other clue: the weekly % only grows until the reset,
+  so a drop between two readings a few minutes apart dates it.

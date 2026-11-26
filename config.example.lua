@@ -61,9 +61,10 @@ return {
   -- A "working" or "waiting" session with no news for this long is forgotten (seconds).
   workingTimeout = 1800,
 
-  -- Each tab shows its account's weekly usage and the time to its reset
-  -- ("Personal · 7% · 2d"), from the readings Claude saves itself. Dimmed
-  -- when older than 40 min.
+  -- Each tab shows its account's weekly usage and when it resets
+  -- ("Personal · 7% · ↻ Sun 17:00"), with a gauge (bar = usage, tick = share
+  -- of the week gone by), from the readings Claude saves itself. Dimmed when
+  -- older than 40 min.
   usage = true,
   -- Claude only keeps reading usage while its usage menu (right-click on its
   -- menu bar icon) was opened in the last 24 h. With this on, when a tab's

@@ -460,11 +460,47 @@ local USAGE_REFRESH = SHOW_USAGE and cfg.usageRefresh ~= false
 local USAGE_IDLE = cfg.usageIdle or 120   -- seconds without keyboard or mouse
 local USAGE_STALE = 40 * 60               -- Claude reads at least every 15 min
 local USAGE_RETRY = 30 * 60               -- between two tries for one account
-local RESET_KEY = "claudeTabs.usageReset"
-local resetAt = {}                         -- profile id -> weekly reset (epoch s), estimated
+local RESET_KEY = "claudeTabs.usageResetWindow"
+local WEEK = 7 * 86400
+-- profile id -> { lo = s, hi = s }: the weekly reset falls between lo and hi.
+-- Each clue narrows it down: the menu's rounded "Resets 3d" (about 3 days from
+-- now), and a drop of the weekly % in the history (a reset between those two
+-- readings). The reset comes back every 7 days, so an old clue still holds,
+-- a whole number of weeks later.
+local resetWin = {}
 local pokeAt = {}                          -- profile id -> last try (epoch s)
 
 local function nowS() return hs.timer.secondsSinceEpoch() end
+
+-- The same window, moved by whole weeks to the next reset still to come.
+local function ahead(lo, hi, now)
+  while hi <= now do lo, hi = lo + WEEK, hi + WEEK end
+  return lo, hi
+end
+
+local function addResetClue(p, lo, hi)
+  local now = nowS()
+  lo, hi = ahead(lo, hi, now)
+  local w = resetWin[p.id]
+  if w then
+    local wlo, whi = ahead(w.lo, w.hi, now)
+    local nlo, nhi = math.max(lo, wlo), math.min(hi, whi)
+    -- No overlap: the reset time changed. Start over from the new clue.
+    if nlo < nhi then lo, hi = nlo, nhi end
+  end
+  if not w or w.lo ~= lo or w.hi ~= hi then
+    resetWin[p.id] = { lo = lo, hi = hi }
+    hs.settings.set(RESET_KEY, resetWin)
+  end
+end
+
+-- Middle of the next reset window, and its width (seconds).
+local function resetInfo(p)
+  local w = resetWin[p.id]
+  if not w then return nil end
+  local lo, hi = ahead(w.lo, w.hi, nowS())
+  return (lo + hi) / 2, hi - lo
+end
 
 -- Re-read an account's usage file if it changed. Returns true when it did.
 local function readUsage(p)
@@ -475,62 +511,114 @@ local function readUsage(p)
   p.usageMtime = mtime
   local s = mtime and readFile(path)
   local ok, d = pcall(function() return s and hs.json.decode(s) end)
-  local last
+  local samples = {}
   for _, x in ipairs(ok and type(d) == "table" and type(d.samples) == "table" and d.samples or {}) do
-    if type(x) == "table" and tonumber(x.t) and type(x.u) == "table"
-      and (not last or x.t >= last.t) then last = x end
+    if type(x) == "table" and tonumber(x.t) and type(x.u) == "table" then samples[#samples + 1] = x end
   end
+  table.sort(samples, function(a, b) return a.t < b.t end)
+  local last = samples[#samples]
   p.usage = last and { week = tonumber(last.u.sd), five = tonumber(last.u.fh), at = last.t / 1000 } or nil
+  -- The weekly % only grows until the reset: the last clear drop between two
+  -- close readings of this account dates the reset.
+  local prev, drop
+  for _, x in ipairs(samples) do
+    if x.org == last.org then
+      local a, b = prev and tonumber(prev.u.sd), tonumber(x.u.sd)
+      if a and b and b < a and (b <= 1 or a - b >= 2) and x.t - prev.t <= 3 * 3600 * 1000 then
+        drop = { prev.t / 1000, x.t / 1000 }
+      end
+      prev = x
+    end
+  end
+  if drop then addResetClue(p, drop[1], drop[2]) end
   return true
 end
 
--- "2j", "5h", "<1h"
-local function shortDuration(secs)
-  if secs >= 86400 then return math.floor(secs / 86400) .. S.unitDay end
-  if secs >= 3600 then return math.floor(secs / 3600) .. S.unitHour end
+-- "3j 7h", "7h", "<1h"
+local function countdown(secs)
+  local d, h = math.floor(secs / 86400), math.floor(secs % 86400 / 3600)
+  if d > 0 then return d .. S.unitDay .. (h > 0 and (" " .. h .. S.unitHour) or "") end
+  if h > 0 then return h .. S.unitHour end
   return "<1" .. S.unitHour
 end
 
-local function resetIn(p)
-  local t = resetAt[p.id]
-  local now = nowS()
-  if t and t > now then return shortDuration(t - now) end
+-- "dim. 17h" when known to the hour, else "~dim.".
+local function resetLabel(p)
+  local mid, width = resetInfo(p)
+  if not mid then return nil end
+  local exact = width <= 3 * 3600
+  local d = os.date("*t", math.floor(exact and mid + 1800 or mid))
+  local today = os.date("*t")
+  local day = (d.year == today.year and d.yday == today.yday) and S.today or S.days[d.wday]
+  return exact and S.resetAt:format(day, d.hour) or ("~" .. day), exact
 end
+
+-- Share of the week gone by (0 to 1), when the reset is known.
+local function weekElapsed(p)
+  local mid = resetInfo(p)
+  if not mid then return nil end
+  return math.max(0, math.min(1, 1 - (mid - nowS()) / WEEK))
+end
+
+-- "over": at this pace, over 100 % before the reset. "ahead": using it faster
+-- than the week goes by. Without a known reset, plain thresholds.
+local function pace(p)
+  local u, e = p.usage.week, weekElapsed(p)
+  if not e then return u >= 80 and "over" or u >= 50 and "ahead" or "ok" end
+  if u >= 90 or (e >= 0.1 and u / e >= 100) then return "over" end
+  if u >= 10 and u > e * 100 then return "ahead" end
+  return "ok"
+end
+local PACE_COLORS = { over = "#FF453A", ahead = "#F5A623" }
 
 local function usageStale(p)
   return not p.usage or nowS() - p.usage.at > USAGE_STALE
 end
 
--- For the tab: " · 7 % · 2j", with its colour (dimmed when stale).
-local function usageTag(p)
+-- For the tab: "  ·  8 %  ·  ↻ dim. 17h", coloured by pace, dimmed when stale.
+-- `style(color, font)` gives the tab's text attributes.
+local function usageTag(p, style)
   if not SHOW_USAGE or not p.usage or not p.usage.week then return nil end
-  local text = "  ·  " .. S.pct:format(p.usage.week)
-  local r = resetIn(p)
-  if r then text = text .. " · " .. r end
-  local color = p.usage.week >= 80 and { hex = "#FF453A" }
-    or p.usage.week >= 50 and { hex = "#F5A623" } or { white = 1 }
-  color.alpha = usageStale(p) and 0.4 or 0.8
-  return text, color
+  local hex = PACE_COLORS[pace(p)]
+  local color = hex and { hex = hex } or { white = 1 }
+  color.alpha = usageStale(p) and 0.4 or 0.85
+  local text = hs.styledtext.new("  ·  " .. S.pct:format(p.usage.week), style(color))
+  local r = resetLabel(p)
+  if r then
+    local soft = { white = 1, alpha = color.alpha }
+    text = text .. hs.styledtext.new("  ·  ", style(soft))
+      -- The arrow is missing from Helvetica Neue: take it from the system font.
+      .. hs.styledtext.new("↻ ", style(soft, { name = ".AppleSystemUIFont", size = 12 }))
+      .. hs.styledtext.new(r, style(soft))
+  end
+  return text
 end
 
--- For the menus: "semaine 7 % (~2j) · 5 h 3 % · il y a 4 min"
+-- For the menus: "semaine 8 % · ↻ dim. 17h (dans 3j 7h) · 5 h 3 % · il y a 4 min"
 local function usageDetail(p)
   if not p.usage then return nil end
   local parts = {}
   if p.usage.week then
-    local r = resetIn(p)
-    parts[#parts + 1] = S.usageWeek:format(S.pct:format(p.usage.week)) .. (r and (" (~" .. r .. ")") or "")
+    local part = S.usageWeek:format(S.pct:format(p.usage.week))
+    local r, exact = resetLabel(p)
+    if r then
+      local mid = resetInfo(p)
+      part = part .. " · ↻ " .. r .. " (" .. S.inTime:format((exact and "" or "~")
+        .. countdown(math.max(0, mid - nowS()))) .. ")"
+    end
+    parts[#parts + 1] = part
   end
   if p.usage.five then parts[#parts + 1] = S.usageFive:format(S.pct:format(p.usage.five)) end
   local age = nowS() - p.usage.at
   parts[#parts + 1] = age < 60 and S.usageNow
-    or S.usageAge:format(age < 3600 and (math.floor(age / 60) .. " " .. S.unitMin) or shortDuration(age))
+    or S.usageAge:format(age < 3600 and (math.floor(age / 60) .. " " .. S.unitMin) or countdown(age))
   return table.concat(parts, " · ")
 end
 
 -- Time to the weekly reset, from the open usage menu: a "Weekly · all models"
--- row followed by "12% · Resets 2d" (or "4h", "2d 5h"…). Rounded by Claude,
--- so take the middle of the smallest unit.
+-- row followed by "12% · Resets 3d" (or "4h", "2d 5h"…). Claude rounds down:
+-- "3d" is between 3 and 4 days. Returns the earliest and latest number of
+-- seconds it can mean.
 local UNITS = { d = 86400, h = 3600, m = 60 }
 local function weeklyResetFromMenu(menu)
   for _, item in ipairs(menu:attributeValue("AXChildren") or {}) do
@@ -548,7 +636,8 @@ local function weeklyResetFromMenu(menu)
         secs = secs + tonumber(n) * UNITS[u]
         smallest = math.min(smallest or math.huge, UNITS[u])
       end
-      return smallest and (secs + smallest / 2) or nil
+      if not smallest then return nil end
+      return secs, secs + smallest
     end
   end
 end
@@ -574,17 +663,18 @@ local function pokeUsage(p, done)
   end
   local back = hs.mouse.absolutePosition()
   hs.eventtap.rightClick(pt)
-  hs.timer.doAfter(0.6, function()
-    -- The menu opens under the icon: check it is there before pressing
-    -- Escape, so the key can never reach a window (and stop a session).
+  -- The menu opens under the icon: check it is there before pressing Escape,
+  -- so the key can never reach a window (and stop a session). Claude can take
+  -- a moment to build it: look for up to 2 s.
+  local tries = 0
+  local function check()
+    tries = tries + 1
     local e = hs.axuielement.systemElementAtPosition({ x = pt.x, y = f.y + f.h + 20 })
     local open = e and e:pid() == p.pid and e:attributeValue("AXRole") == "AXMenuItem"
+    if not open and tries < 8 then hs.timer.doAfter(0.25, check); return end
     if open then
-      local secs = weeklyResetFromMenu(e:attributeValue("AXParent"))
-      if secs then
-        resetAt[p.id] = nowS() + secs
-        hs.settings.set(RESET_KEY, resetAt)
-      end
+      local lo, hi = weeklyResetFromMenu(e:attributeValue("AXParent"))
+      if lo then addResetClue(p, nowS() + lo - 60, nowS() + hi + 60) end
       hs.eventtap.keyStroke({}, "escape", 0)
       log.i("usage: opened the usage menu of " .. p.id)
     else
@@ -592,7 +682,8 @@ local function pokeUsage(p, done)
     end
     hs.mouse.absolutePosition(back)
     done(open)
-  end)
+  end
+  hs.timer.doAfter(0.4, check)
 end
 
 ---------------------------------------------------------------------------
@@ -798,7 +889,34 @@ drawBar = function()
       frame = { x = x0 + 3, y = 3, w = tabW - 6, h = BAR_H - 6 },
       roundedRectRadii = { xRadius = 6, yRadius = 6 },
     }
-    if not active then  -- coloured underline to recognise the account
+    local week = SHOW_USAGE and p.usage and p.usage.week
+    if week then
+      -- Usage gauge, in the account's colour (or the pace's): the bar is the
+      -- weekly usage, the tick how much of the week has gone by.
+      local mx, mw = x0 + 10, tabW - 20
+      local paceHex = PACE_COLORS[pace(p)]
+      local dim = usageStale(p) and 0.5 or 1
+      els[#els + 1] = {
+        type = "rectangle", action = "fill",
+        fillColor = active and { white = 0, alpha = 0.25 } or { white = 1, alpha = 0.15 },
+        frame = { x = mx, y = BAR_H - 7, w = mw, h = 3 },
+        roundedRectRadii = { xRadius = 1.5, yRadius = 1.5 },
+      }
+      els[#els + 1] = {
+        type = "rectangle", action = "fill",
+        fillColor = { hex = paceHex or (active and "#FFFFFF" or p.color), alpha = dim },
+        frame = { x = mx, y = BAR_H - 7, w = math.max(2, mw * math.min(week, 100) / 100), h = 3 },
+        roundedRectRadii = { xRadius = 1.5, yRadius = 1.5 },
+      }
+      local e = weekElapsed(p)
+      if e then
+        els[#els + 1] = {
+          type = "rectangle", action = "fill",
+          fillColor = active and { hex = "#1B1B1D", alpha = 0.9 } or { white = 1, alpha = 0.9 },
+          frame = { x = mx + mw * e - 1, y = BAR_H - 9, w = 2, h = 7 },
+        }
+      end
+    elseif not active then  -- coloured underline to recognise the account
       els[#els + 1] = {
         type = "rectangle", action = "fill", fillColor = { hex = p.color },
         frame = { x = x0 + 3, y = BAR_H - 5, w = tabW - 6, h = 2 },
@@ -807,16 +925,16 @@ drawBar = function()
     local label = i .. "  " .. p.label
     local st = stateText(p)
     if st ~= "" then label = label .. "  ·  " .. st end
-    local function style(color)
+    local function style(color, font)
       return {
-        font = { name = active and "HelveticaNeue-Medium" or "Helvetica Neue", size = 13 },
+        font = font or { name = active and "HelveticaNeue-Medium" or "Helvetica Neue", size = 13 },
         color = color,
         paragraphStyle = { alignment = "center", lineBreak = "truncateTail" },
       }
     end
     local text = hs.styledtext.new(label, style({ white = 1, alpha = p.pid and 1 or 0.45 }))
-    local tag, tagColor = usageTag(p)
-    if tag then text = text .. hs.styledtext.new(tag, style(tagColor)) end
+    local tag = usageTag(p, style)
+    if tag then text = text .. tag end
     els[#els + 1] = {
       type = "text",
       frame = { x = x0 + 12, y = (BAR_H - 17) / 2, w = tabW - 24 - badgesW, h = 18 },
@@ -1430,7 +1548,12 @@ function M.start()
   -- away from the keyboard for a while with the screen on, open its usage
   -- menu (one account per minute, one try per account every 30 min).
   if SHOW_USAGE then
-    for id, t in pairs(hs.settings.get(RESET_KEY) or {}) do resetAt[id] = tonumber(t) end
+    for id, w in pairs(hs.settings.get(RESET_KEY) or {}) do
+      if type(w) == "table" and tonumber(w.lo) and tonumber(w.hi) then
+        resetWin[id] = { lo = tonumber(w.lo), hi = tonumber(w.hi) }
+      end
+    end
+    hs.settings.clear("claudeTabs.usageReset")  -- older format
     local screens = { asleep = false, saver = false, locked = false, away = false }
     local W = hs.caffeinate.watcher
     local events = {
@@ -1461,7 +1584,7 @@ function M.start()
       local now = nowS()
       for _, p in ipairs(profiles) do
         if p.pid and usageStale(p) and now - (pokeAt[p.id] or 0) > USAGE_RETRY then
-          pokeUsage(p); return
+          pokeUsage(p, function() draw() end); return
         end
       end
     end)
@@ -1555,6 +1678,7 @@ function M.refreshUsage(id)
   local p = byId[id or activeId]
   if not p or not p.pid then return false end
   pokeUsage(p, function()
+    draw()  -- the reset time may have changed
     -- Claude writes the file once its request comes back.
     for _, delay in ipairs({ 1, 3, 8 }) do
       hs.timer.doAfter(delay, function() if readUsage(p) then draw() end end)
@@ -1566,10 +1690,13 @@ end
 function M.usage()
   local out = {}
   for _, p in ipairs(profiles) do
-    out[#out + 1] = string.format("%s week=%s five=%s age=%s reset=%s stale=%s",
+    local mid, width = resetInfo(p)
+    out[#out + 1] = string.format("%s week=%s five=%s age=%s reset=%s width=%s elapsed=%s pace=%s stale=%s",
       p.id, tostring(p.usage and p.usage.week), tostring(p.usage and p.usage.five),
-      p.usage and math.floor(nowS() - p.usage.at) .. "s" or "-", resetIn(p) or "-",
-      tostring(usageStale(p)))
+      p.usage and math.floor(nowS() - p.usage.at) .. "s" or "-",
+      mid and os.date("%a %d %H:%M", math.floor(mid)) or "-", width and math.floor(width / 60) .. "min" or "-",
+      tostring(weekElapsed(p) and math.floor(weekElapsed(p) * 100) .. "%"),
+      p.usage and p.usage.week and pace(p) or "-", tostring(usageStale(p)))
   end
   return table.concat(out, "\n")
 end

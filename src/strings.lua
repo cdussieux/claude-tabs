@@ -48,6 +48,10 @@ return {
     usageAge = "%s ago",
     usageNow = "just now",
     menuUsageRefresh = "Refresh usage",
+    days = { "Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat" },
+    today = "today",
+    resetAt = "%s %d:00",
+    inTime = "in %s",
   },
   fr = {
     closed = "fermé",
@@ -93,5 +97,9 @@ return {
     usageAge = "il y a %s",
     usageNow = "à l'instant",
     menuUsageRefresh = "Actualiser l'usage",
+    days = { "dim.", "lun.", "mar.", "mer.", "jeu.", "ven.", "sam." },
+    today = "auj.",
+    resetAt = "%s %dh",
+    inTime = "dans %s",
   },
 }

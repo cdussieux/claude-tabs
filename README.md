@@ -28,9 +28,12 @@ stacks their windows under a tab bar drawn by [Hammerspoon](https://www.hammersp
   🟠 working · 🟢 done and not read yet · 🔴 waiting for you (question or
   permission). A done session leaves the counter when you open it. Totals also
   sit in the menu bar (✳︎).
-- **Plan usage on each tab**: the account's weekly usage and the time to its
-  reset (`Team · 12% · 2d`), orange from 50%, red from 80%, dimmed when the
-  reading is old. The menus add the 5-hour limit.
+- **Plan usage on each tab**: the account's weekly usage and when it resets
+  (`Team · 12% · ↻ Fri 9:00`, or `↻ ~Fri` while the hour is not known yet),
+  and a gauge under the tab: the bar is the usage, the tick how much of the
+  week has gone by. Orange when you use it faster than the week goes by, red
+  when at this pace you would run out before the reset. Dimmed when the
+  reading is old. The menus add the countdown and the 5-hour limit.
 - **Behaves like one window**: drag the tab bar to move the group to another
   screen; it fills the screen it is on (`autoFill`), and follows the Dock and
   screens being plugged or woken up. `⌃⌥E` moves it to the next screen.
@@ -121,6 +124,9 @@ All are configurable in `config.lua`.
   its usage menu (right-click on its menu bar icon) was opened in the last 24 h,
   so when a tab's numbers go stale and you are idle, Claude Tabs opens that
   menu for a moment and closes it. Tab menu > "Refresh usage" does it now.
+  The menu gives the time to the reset, rounded down ("Resets 3d"); each
+  reading narrows the window, and a drop of the weekly % in the history dates
+  the last reset to within minutes (the next one is 7 days later).
 
 More detail and the pitfalls met on the way: [docs/how-it-works.md](docs/how-it-works.md).
 
@@ -128,7 +134,8 @@ More detail and the pitfalls met on the way: [docs/how-it-works.md](docs/how-it-
 
 - Only **Code** sessions are counted, not chat conversations.
 - Usage needs Claude's menu bar icon to be visible (not hidden behind the notch
-  or by a menu bar manager); the reset time is rounded by Claude ("2d").
+  or by a menu bar manager). Until the last day before a reset, or a reset
+  seen in the history, its time is only known to the day (`~Fri`).
 - `~/.claude` (Claude Code settings, transcripts) is shared by all accounts.
 - macOS only. Thoughts on Linux: [docs/linux.md](docs/linux.md).
 
