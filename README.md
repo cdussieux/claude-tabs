@@ -33,8 +33,9 @@ stacks their windows under a tab bar drawn by [Hammerspoon](https://www.hammersp
 - **Find them**: click a tab's badges for its sessions, with what each one
   waits for; click one to open it right there, in its account. The red
   `! 2 · 3 h` button before `+` appears when sessions wait for you (2, the
-  oldest for 3 h): it lists them across all accounts, oldest first, with the
-  working and done ones folded below. `⌃⌥N` opens the next one waiting.
+  oldest for 3 h): it lists them across all accounts, oldest first, then the
+  working and done ones; click a section's title to fold it. `⌃⌥N` opens the
+  next one waiting.
   ⌥-click one you won't answer now to drop it until its next turn. The same
   list sits in the menu bar (✳︎).
 - **Plan usage on each tab**: the account's weekly usage and when it resets

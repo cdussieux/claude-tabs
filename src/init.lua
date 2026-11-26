@@ -997,63 +997,77 @@ local function dismissHint(items, entries)
   end
 end
 
+-- Sections are open; click a section's title to fold or unfold it (kept
+-- across menus and reloads). `reopen` shows the menu again in the same place,
+-- since a menu closes on any click.
+local FOLD_KEY = "claudeTabs.folded"
+local folded = hs.settings.get(FOLD_KEY) or {}
+
+local function addSection(items, st, list, withAccount, reopen, label)
+  if #list == 0 then return end
+  local t = hs.styledtext.new((folded[st] and "▸  " or "▾  ") .. (label or SECTION[st]) .. "  (" .. #list .. ")",
+    { color = { list = "System", name = "secondaryLabelColor" }, font = { name = UI_FONT, size = 12 } })
+  items[#items + 1] = { title = t, fn = function()
+    folded[st] = (not folded[st]) or nil
+    hs.settings.set(FOLD_KEY, folded)
+    if reopen then hs.timer.doAfter(0.05, reopen) end
+  end }
+  if not folded[st] then
+    for _, e in ipairs(list) do items[#items + 1] = sessionItem(e, withAccount) end
+  end
+end
+
 -- One account's sessions, by state.
-local function sessionItems(p)
+local function sessionItems(p, reopen)
   local items = {}
   for _, st in ipairs(ORDER) do
-    local l = sortedEntries(p.view or {}, st)
-    if #l > 0 then
-      items[#items + 1] = { title = SECTION[st], disabled = true }
-      for _, e in ipairs(l) do items[#items + 1] = sessionItem(e, false) end
-    end
+    addSection(items, st, sortedEntries(p.view or {}, st), false, reopen)
   end
   if #items == 0 then items[1] = { title = S.noSessions, disabled = true } end
   return items
 end
 
--- All accounts: the sessions waiting for you, oldest first; the others folded
--- into submenus.
-local function queueItems()
+-- All accounts: the sessions waiting for you (oldest first), working, done.
+local function queueItems(reopen)
   local items = {}
   local waiting = allEntries("attention")
-  if #waiting > 0 then
-    items[#items + 1] = { title = S.queueTitle, disabled = true }
-    for _, e in ipairs(waiting) do items[#items + 1] = sessionItem(e, true) end
-  else
-    items[#items + 1] = { title = S.noneWaiting, disabled = true }
-  end
-  for _, st in ipairs({ "working", "done" }) do
-    local l = allEntries(st)
-    if #l > 0 then
-      local sub = {}
-      for _, e in ipairs(l) do sub[#sub + 1] = sessionItem(e, true) end
-      items[#items + 1] = { title = SECTION[st] .. "  (" .. #l .. ")", menu = sub }
-    end
-  end
+  if #waiting == 0 then items[1] = { title = S.noneWaiting, disabled = true } end
+  addSection(items, "attention", waiting, true, reopen, S.queueTitle)
+  addSection(items, "working", allEntries("working"), true, reopen)
+  addSection(items, "done", allEntries("done"), true, reopen)
   items[#items + 1] = { title = "-" }
   items[#items + 1] = { title = S.nextWaiting, disabled = #waiting == 0, fn = function() M.nextWaiting() end }
   dismissHint(items, waiting)
   return items
 end
 
-local function popup(items, at)
-  if M.tabPopup then M.tabPopup:delete() end
-  M.tabPopup = hs.menubar.new(false)
-  M.tabPopup:setMenu(items)
-  M.tabPopup:popupMenu(at or hs.mouse.absolutePosition())
+-- Pop up the menu build(reopen) returns, at `at` (else under the mouse).
+local function popup(build, at)
+  local pos = at or hs.mouse.absolutePosition()
+  local function open()
+    if M.tabPopup then M.tabPopup:delete() end
+    M.tabPopup = hs.menubar.new(false)
+    M.tabPopup:setMenu(build(open))
+    M.tabPopup:popupMenu(pos)
+  end
+  open()
 end
 
 local function sessionsMenu(p, at)
-  buildView(p)
-  local items = sessionItems(p)
-  dismissHint(items, sortedEntries(p.view or {}, "attention"))
-  popup(items, at)
+  popup(function(reopen)
+    buildView(p)
+    local items = sessionItems(p, reopen)
+    dismissHint(items, sortedEntries(p.view or {}, "attention"))
+    return items
+  end, at)
 end
 
 -- (at: where to open it, for tests; else under the mouse)
 function M.queueMenu(at)
-  buildViews()
-  popup(queueItems(), at)
+  popup(function(reopen)
+    buildViews()
+    return queueItems(reopen)
+  end, at)
 end
 
 function M.sessionsMenu(id, at)
@@ -1159,7 +1173,7 @@ end
 local dragTap
 local lastDown = { t = 0, x = -100 }
 local PLUS_W = cfg.addButton == false and 0 or 32
-local tabMenu  -- defined with the tab actions below
+local tabMenu, tabMenuItems  -- defined with the tab actions below
 local function tabWidth() return (zone().bar.w - PLUS_W - queueW) / #profiles end
 
 local function onBarClick(_, msg, _, x, _)
@@ -1375,6 +1389,8 @@ drawBar = function()
   if barVisible() then canvas:show() else canvas:hide() end
 end
 
+local menubarItems  -- below
+
 local function drawMenubar()
   if cfg.menubar == false then return end
   if not menubar then menubar = hs.menubar.new() end
@@ -1389,46 +1405,53 @@ local function drawMenubar()
   if done > 0 then title = title .. hs.styledtext.new(" " .. done, { color = COLORS.done, font = font }) end
   if att > 0 then title = title .. hs.styledtext.new(" " .. att, { color = COLORS.attention, font = font }) end
   menubar:setTitle(title)
-  menubar:setMenu(function()
-    buildViews()
-    local items = queueItems()
+  -- After folding a section, the menu comes back as a pop-up under the icon.
+  local function reopen()
+    local f = menubar:frame()
+    popup(menubarItems, f and { x = f.x, y = f.y + f.h } or nil)
+  end
+  menubar:setMenu(function() return menubarItems(reopen) end)
+end
+
+menubarItems = function(reopen)
+  buildViews()
+  local items = queueItems(reopen)
+  items[#items + 1] = { title = "-" }
+  for i, p in ipairs(profiles) do
+    local st = stateText(p)
+    if st == "" then st = countsText(p) end
+    items[#items + 1] = {
+      title = i .. "  " .. p.label .. (st ~= "" and ("  —  " .. st) or ""),
+      checked = (p.id == activeId),
+      fn = function() M.switchTo(p.id) end,
+    }
+    local u = SHOW_USAGE and usageDetail(p)
+    if u then items[#items + 1] = { title = "      " .. u, disabled = true } end
+  end
+  items[#items + 1] = { title = "-" }
+  local active = activeId and byId[activeId]
+  if signInTarget then
+    items[#items + 1] = { title = S.menuStopSignIn:format(byId[signInTarget].label),
+      fn = function() M.stopSignIn() end }
+  else
+    items[#items + 1] = {
+      title = S.menuSignIn:format(active and active.label or "?"),
+      disabled = not active,
+      fn = function() M.startSignIn() end,
+    }
+  end
+  items[#items + 1] = { title = "-" }
+  if WINDOW_MODE then
+    items[#items + 1] = { title = S.menuFill, fn = function() M.fillScreen() end }
+    items[#items + 1] = { title = S.menuNextScreen, fn = function() M.nextScreen() end }
     items[#items + 1] = { title = "-" }
-    for i, p in ipairs(profiles) do
-      local st = stateText(p)
-      if st == "" then st = countsText(p) end
-      items[#items + 1] = {
-        title = i .. "  " .. p.label .. (st ~= "" and ("  —  " .. st) or ""),
-        checked = (p.id == activeId),
-        fn = function() M.switchTo(p.id) end,
-      }
-      local u = SHOW_USAGE and usageDetail(p)
-      if u then items[#items + 1] = { title = "      " .. u, disabled = true } end
-    end
-    items[#items + 1] = { title = "-" }
-    local active = activeId and byId[activeId]
-    if signInTarget then
-      items[#items + 1] = { title = S.menuStopSignIn:format(byId[signInTarget].label),
-        fn = function() M.stopSignIn() end }
-    else
-      items[#items + 1] = {
-        title = S.menuSignIn:format(active and active.label or "?"),
-        disabled = not active,
-        fn = function() M.startSignIn() end,
-      }
-    end
-    items[#items + 1] = { title = "-" }
-    if WINDOW_MODE then
-      items[#items + 1] = { title = S.menuFill, fn = function() M.fillScreen() end }
-      items[#items + 1] = { title = S.menuNextScreen, fn = function() M.nextScreen() end }
-      items[#items + 1] = { title = "-" }
-    end
-    items[#items + 1] = { title = S.menuAdd, fn = function() M.addProfile() end }
-    items[#items + 1] = { title = "-" }
-    items[#items + 1] = { title = S.menuConfig, fn = function()
-      hs.execute("open -t " .. shq(DIR .. "/config.lua")) end }
-    items[#items + 1] = { title = S.menuReload, fn = hs.reload }
-    return items
-  end)
+  end
+  items[#items + 1] = { title = S.menuAdd, fn = function() M.addProfile() end }
+  items[#items + 1] = { title = "-" }
+  items[#items + 1] = { title = S.menuConfig, fn = function()
+    hs.execute("open -t " .. shq(DIR .. "/config.lua")) end }
+  items[#items + 1] = { title = S.menuReload, fn = hs.reload }
+  return items
 end
 
 draw = function()
@@ -1572,8 +1595,12 @@ function M.removeProfile(id, confirmed)
 end
 
 tabMenu = function(p)
+  popup(function(reopen) return tabMenuItems(p, reopen) end)
+end
+
+tabMenuItems = function(p, reopen)
   buildView(p)
-  local items = sessionItems(p)
+  local items = sessionItems(p, reopen)
   items[#items + 1] = { title = "-" }
   for _, it in ipairs({
     { title = S.menuSignInTab, fn = function() M.startSignIn(p.id) end },
@@ -1591,7 +1618,7 @@ tabMenu = function(p)
   for _, it in ipairs({
     { title = S.menuAdd, fn = function() M.addProfile() end },
   }) do items[#items + 1] = it end
-  popup(items)
+  return items
 end
 
 -- Modifier + scroll (mouse or trackpad) while Claude is in front: one notch =
