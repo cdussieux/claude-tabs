@@ -37,7 +37,8 @@ return {
   autoSignIn = true,
 
   -- Shortcuts: mods + 1, 2, 3… go to tab n; + F fills the screen; + E moves to
-  -- the next screen; + L starts sign-in mode for the current tab.
+  -- the next screen; + L starts sign-in mode for the current tab; + N opens
+  -- the next session waiting for you.
   hotkeyMods = { "ctrl", "alt" },
 
   -- Modifier + scroll (mouse or trackpad) while Claude is in front:
@@ -60,6 +61,9 @@ return {
 
   -- A "working" or "waiting" session with no news for this long is forgotten (seconds).
   workingTimeout = 1800,
+  -- A session whose last turn ended on a question for you stays "waiting for
+  -- you" this long at most (seconds), unless you answer or ⌥-click it away.
+  waitingMaxAge = 86400,
 
   -- Each tab shows its account's weekly usage and when it resets
   -- ("Personal · 7% · ↻ Sun 17:00"), with a gauge (bar = usage, tick = share

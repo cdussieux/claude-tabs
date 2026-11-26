@@ -5,7 +5,7 @@ account, all in one window, with live counters of your Claude Code sessions.
 
 ```
 ┌──────────────────────────────────────────────────────────────────────┐
-│ 1  Personal   ①②  │ 2  Work            ③ │ 3  Client · closed   │ + │
+│ 1  Personal  ⋯2 ✓1 │ 2  Work         !1 │ 3  Client · closed │ !1 · 3 h │ + │
 ├──────────────────────────────────────────────────────────────────────┤
 │                                                                      │
 │              the Claude Desktop window of the active tab             │
@@ -24,10 +24,19 @@ stacks their windows under a tab bar drawn by [Hammerspoon](https://www.hammersp
 
 - **One tab per account**, any number of accounts. Click a tab, `⌃⌥1…9`, or
   `⌘ + scroll` (mouse or trackpad) to switch. A closed account starts on click.
-- **Session counters on each tab**, for that account's Code sessions:
-  🟠 working · 🟢 done and not read yet · 🔴 waiting for you (question or
-  permission). A done session leaves the counter when you open it. Totals also
-  sit in the menu bar (✳︎).
+- **Session badges on each tab**, for that account's Code sessions:
+  `⋯` working (agents left running in the background included) · `✓` done and
+  not opened yet · `!` waiting for you: a permission or question in the middle
+  of a turn, or a turn that ended on something only you can give (a choice, an
+  answer: Claude says so in the summary it writes after each turn). A done
+  session leaves the count when you open it.
+- **Find them**: click a tab's badges for its sessions, with what each one
+  waits for; click one to open it right there, in its account. The red
+  `! 2 · 3 h` button before `+` appears when sessions wait for you (2, the
+  oldest for 3 h): it lists them across all accounts, oldest first, with the
+  working and done ones folded below. `⌃⌥N` opens the next one waiting.
+  ⌥-click one you won't answer now to drop it until its next turn. The same
+  list sits in the menu bar (✳︎).
 - **Plan usage on each tab**: the account's weekly usage and when it resets
   (`Team · 12% · ↻ Fri 9:00`, or `↻ ~Fri` while the hour is not known yet),
   and a gauge under the tab: the bar is the usage, the tick how much of the
@@ -101,6 +110,8 @@ own sign-in sheet, which answers the right instance directly.
 | `+` after the last tab | add an account |
 | right-click a tab | sign in, rename, remove |
 | `⌃⌥L` | sign-in mode for the current tab, by hand |
+| `⌃⌥N` | open the next session waiting for you (any account) |
+| click a tab's badges | its sessions; click one to open it |
 
 All are configurable in `config.lua`.
 
@@ -117,6 +128,13 @@ All are configurable in `config.lua`.
   the session by walking up its parent processes and tells Hammerspoon
   (`hammerspoon://claude-tabs?...`). Whether you have read a finished session
   comes from Claude Desktop's own session files (`lastFocusedAt`).
+- **Sessions**: every 30 s, and when Claude rewrites a session file, Claude
+  Tabs also reads the session files of the last 24 h (title, and the summary
+  Claude writes after each turn: blocked or not, and what it needs from you),
+  and the dates of each session's transcript files in `~/.claude/projects`: a
+  background agent whose file was written in the last 3 min is at work. A
+  session opens with Claude's own `claude://code/continue?session=…` link,
+  sent to its account's instance.
 
 - **Usage**: Claude Desktop saves each usage reading of its account to
   `plan-usage-history.json` in its data folder; Claude Tabs reads that file (no
@@ -133,6 +151,8 @@ More detail and the pitfalls met on the way: [docs/how-it-works.md](docs/how-it-
 ## Limits
 
 - Only **Code** sessions are counted, not chat conversations.
+- A background agent quiet for more than 3 min (a long command) counts as
+  stopped until it writes again.
 - Usage needs Claude's menu bar icon to be visible (not hidden behind the notch
   or by a menu bar manager). Until the last day before a reset, or a reset
   seen in the history, its time is only known to the day (`~Fri`).

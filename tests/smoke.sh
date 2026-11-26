@@ -33,6 +33,7 @@ expect() { [ "$2" = "$3" ] && ok "$1 -> ${3:-gone}" || fail "$1: expected '${3:-
 
 echo "Session counters (pid $PID)"
 expect "prompt"                "$(send prompt)" working
+expect "listed as working"     "$(q 'return ClaudeTabs.sessions()' | awk -v s="$SHORT" '$5 == s { print $2 }')" working
 expect "idle reminder ignored" "$(send attention ',"notification_type":"idle_prompt"')" working
 expect "question asked"        "$(send attention ',"notification_type":"permission_prompt"')" attention
 expect "question answered"     "$(send answered)" working

@@ -214,7 +214,7 @@ end
 
 local function counts(p)
   local w, d, a = 0, 0, 0
-  for _, s in pairs(p.sessions) do
+  for _, s in ipairs(p.view or {}) do
     if s.state == "working" then w = w + 1
     elseif s.state == "done" then d = d + 1
     elseif s.state == "attention" then a = a + 1 end
@@ -257,6 +257,184 @@ local function rescan(p)
   end
   if changed then saveSessions() end
   return changed
+end
+
+---------------------------------------------------------------------------
+-- What each session is doing, from Claude's own files
+--
+-- The hooks miss two things: agents a session leaves running in the
+-- background after its turn has ended, and turns Claude starts by itself
+-- (when such an agent reports back). They also only see a question that
+-- stops a turn (permission, AskUserQuestion), not one Claude asks in its last
+-- message. So Claude Tabs also reads, every 30 s and when Claude rewrites a
+-- session file:
+--  - the session files of the last 24 h (re-read only when they changed):
+--    title, and the summary Claude writes after each turn, which says when
+--    the session is blocked and what it needs from you;
+--  - the dates of each session's conversation files in ~/.claude/projects:
+--    a background agent whose file was written in the last 3 min is at work.
+-- p.view lists the sessions to show: { state, at, title, why, id, agents, p }.
+---------------------------------------------------------------------------
+
+local PROJECTS = HOME .. "/.claude/projects"
+local RECENT_MS = (cfg.waitingMaxAge or 86400) * 1000
+local AGENT_ACTIVE = 180   -- seconds
+local MAIN_ACTIVE = 60     -- seconds
+local DISMISS_KEY = "claudeTabs.dismissed"
+local dismissed = {}       -- session id -> lastTurnEdgeAt of the turn you dropped
+local fileCache = {}       -- session file -> { mtime, info }
+local projectDirs = {}     -- CLI session id -> { dir, at }
+
+local function mtime(path) return hs.fs.attributes(path, "modification") end
+
+local function listDir(dir)
+  local names = {}
+  local ok, iter, obj = pcall(hs.fs.dir, dir)
+  if ok and iter then
+    for name in iter, obj do
+      if name:sub(1, 1) ~= "." then names[#names + 1] = name end
+    end
+  end
+  return names
+end
+
+local function nonEmpty(s) return type(s) == "string" and s ~= "" and s or nil end
+
+local function decodeSession(path)
+  local mt = mtime(path)
+  if not mt then fileCache[path] = nil; return nil end
+  local c = fileCache[path]
+  if c and c.mtime == mt then return c.info end
+  local ok, d = pcall(hs.json.decode, readFile(path) or "")
+  if not ok or type(d) ~= "table" then return c and c.info end
+  local sum = type(d.postTurnSummary) == "table" and d.postTurnSummary or {}
+  -- The summary is about the last turn only if it names Claude's last message.
+  local fresh = d.postTurnSummaryFor ~= nil and d.postTurnSummaryFor == d.lastAssistantUuid
+  local cwd = nonEmpty(d.cwd)
+  local info = {
+    id = nonEmpty(d.sessionId) or path:match("(local_[%w%-]+)%.json$"),
+    cli = nonEmpty(d.cliSessionId),
+    title = nonEmpty(d.title) or (cwd and cwd:match("([^/]+)/?$")) or "?",
+    cwd = cwd,
+    edge = tonumber(d.lastTurnEdgeAt) or 0,
+    activity = tonumber(d.lastActivityAt) or 0,
+    archived = d.isArchived == true,
+    needs = fresh and (nonEmpty(sum.needs_action)
+      or (sum.status_category == "blocked" and (nonEmpty(sum.status_detail) or "…"))) or nil,
+    detail = fresh and nonEmpty(sum.status_detail) or nil,
+  }
+  fileCache[path] = { mtime = mt, info = info }
+  return info
+end
+
+-- The folder of ~/.claude/projects that holds a session's conversation.
+local function projectDir(info)
+  local cli = info.cli
+  if not cli then return nil end
+  local c = projectDirs[cli]
+  if c and (c.dir and mtime(c.dir .. "/" .. cli .. ".jsonl") or (not c.dir and os.time() - c.at < 600)) then
+    return c.dir
+  end
+  local dir = info.cwd and (PROJECTS .. "/" .. (info.cwd:gsub("[^%w]", "-")))
+  if not (dir and mtime(dir .. "/" .. cli .. ".jsonl")) then
+    dir = nil
+    for _, name in ipairs(listDir(PROJECTS)) do
+      if mtime(PROJECTS .. "/" .. name .. "/" .. cli .. ".jsonl") then dir = PROJECTS .. "/" .. name; break end
+    end
+  end
+  projectDirs[cli] = { dir = dir, at = os.time() }
+  return dir
+end
+
+-- Does the conversation end with Claude's final answer (or is it mid-turn)?
+local function endsWithAnswer(path)
+  local f = io.open(path, "rb")
+  if not f then return true end
+  local size = f:seek("end")
+  f:seek("set", math.max(0, size - 32768))
+  local s = f:read("a") or ""
+  f:close()
+  local lines = {}
+  for line in s:gmatch("[^\n]+") do lines[#lines + 1] = line end
+  for i = #lines, 1, -1 do
+    local l = lines[i]
+    if l:find('"type":"assistant"', 1, true) then return l:find('"stop_reason":"end_turn"', 1, true) ~= nil end
+    if l:find('"type":"user"', 1, true) then return false end
+  end
+  return true
+end
+
+-- Main conversation mid-turn?, background agents at work, last write (s).
+local function activity(info, now)
+  local dir = projectDir(info)
+  if not dir then return false, 0, 0 end
+  local main = dir .. "/" .. info.cli .. ".jsonl"
+  local mt = mtime(main) or 0
+  local active = now - mt < MAIN_ACTIVE and not endsWithAnswer(main)
+  local agents, sub = 0, dir .. "/" .. info.cli .. "/subagents"
+  for _, name in ipairs(listDir(sub)) do
+    if name:match("%.jsonl$") then
+      local t = mtime(sub .. "/" .. name)
+      if t and now - t < AGENT_ACTIVE then agents = agents + 1 end
+      if t and t > mt then mt = t end
+    end
+  end
+  return active, agents, mt
+end
+
+local function buildView(p)
+  local now = hs.timer.secondsSinceEpoch()
+  local nowms = now * 1000
+  local view, cliOf = {}, {}
+  local candidates = {}
+  for cli, h in pairs(p.sessions) do
+    if h.file then cliOf[h.file] = cli; candidates[h.file] = true end
+  end
+  local root = sessionsDir(p)
+  for _, a in ipairs(listDir(root)) do
+    for _, o in ipairs(listDir(root .. "/" .. a)) do
+      local dir = root .. "/" .. a .. "/" .. o
+      for _, name in ipairs(listDir(dir)) do
+        if name:match("^local_.+%.json$") then
+          local path = dir .. "/" .. name
+          local mt = mtime(path)
+          if mt and (now - mt) * 1000 < RECENT_MS then candidates[path] = true end
+        end
+      end
+    end
+  end
+  for path in pairs(candidates) do
+    local k = decodeSession(path)
+    local cli = cliOf[path]
+    local h = cli and p.sessions[cli]
+    if k and not k.archived then
+      local active, agents, last = activity(k, now)
+      if h and last * 1000 > (h.alive or 0) then h.alive = last * 1000 end
+      local e = { id = k.id, title = k.title, agents = agents, p = p, detail = k.detail }
+      if h and h.state == "attention" then
+        e.state, e.at, e.why = "attention", h.at, S.whyPermission
+      elseif (h and h.state == "working") or active or agents > 0 then
+        e.state = "working"
+        e.at = (h and h.state == "working" and h.at) or (k.edge > 0 and k.edge) or nowms
+      elseif k.needs and k.edge > nowms - RECENT_MS and dismissed[k.id] ~= k.edge then
+        e.state, e.at, e.why, e.edge = "attention", k.edge, k.needs, k.edge
+      elseif h and h.state == "done" then
+        e.state, e.at, e.why = "done", h.at, k.detail
+      end
+      if e.state then view[#view + 1] = e end
+    end
+  end
+  -- Sessions the hooks know of, whose file was not found (yet).
+  for cli, h in pairs(p.sessions) do
+    if not h.file then
+      view[#view + 1] = { state = h.state, at = h.at, title = cli:sub(1, 8), agents = 0, p = p }
+    end
+  end
+  p.view = view
+end
+
+local function buildViews()
+  for _, p in ipairs(profiles) do buildView(p) end
 end
 
 ---------------------------------------------------------------------------
@@ -693,7 +871,7 @@ end
 local COLORS = {
   bg = { hex = "#1B1B1D" },
   tab = { hex = "#2C2C2F" },
-  working = { hex = "#F5A623" },
+  working = { hex = "#5E9BFF" },
   done = { hex = "#34C759" },
   attention = { hex = "#FF453A" },
 }
@@ -717,15 +895,217 @@ local function countsText(p)
   return table.concat(parts, " · ")
 end
 
--- Numbered badges, left to right: working, done, waiting for you.
-local BADGE_R, BADGE_GAP = 8, 4
+-- Badges, left to right: working (⋯ 2), done (✓ 1), waiting for you (! 1).
+local GLYPHS = { working = "⋯", done = "✓", attention = "!" }
+local BADGE_H, BADGE_GAP = 16, 4
+local UI_FONT = ".AppleSystemUIFont"
+local queueW = 0   -- width of the "waiting for you" button, 0 when hidden
+local hitBadges = {}  -- tab index -> { x1, x2 } of its badges on the bar
+
+local function pillText(glyph, label, color)
+  return hs.styledtext.new(glyph .. " ", { font = { name = UI_FONT, size = 11 }, color = color })
+    .. hs.styledtext.new(label, { font = { name = "HelveticaNeue-Bold", size = 11 }, color = color })
+end
+
 local function badgeList(p)
   local w, d, a = counts(p)
   local list = {}
-  if w > 0 then list[#list + 1] = { n = w, color = COLORS.working, text = { hex = "#1B1B1D" } } end
-  if d > 0 then list[#list + 1] = { n = d, color = COLORS.done, text = { hex = "#1B1B1D" } } end
-  if a > 0 then list[#list + 1] = { n = a, color = COLORS.attention, text = { white = 1 } } end
+  local function add(n, state, textColor)
+    if n == 0 then return end
+    local t = pillText(GLYPHS[state], n > 99 and "99+" or tostring(n), textColor)
+    list[#list + 1] = { text = t, color = COLORS[state], w = math.ceil(hs.drawing.getTextDrawingSize(t).w) + 12 }
+  end
+  add(w, "working", { hex = "#0B2A55" })
+  add(d, "done", { hex = "#0E3B18" })
+  add(a, "attention", { white = 1 })
   return list
+end
+
+---------------------------------------------------------------------------
+-- Session menus: click a tab's badges for its sessions, the red "waiting for
+-- you" button (or the menu bar item) for all accounts. Click a session to
+-- open it in its account; ⌥-click one that waits to drop it until its next turn.
+---------------------------------------------------------------------------
+
+local ORDER = { "attention", "working", "done" }
+local SECTION = { attention = S.secWaiting, working = S.secWorking, done = S.secDone }
+
+local function agoText(ms)
+  local s = math.max(0, (nowMs() - ms) / 1000)
+  if s < 3600 then return math.max(1, math.floor(s / 60)) .. " " .. S.unitMin end
+  if s < 86400 then return math.floor(s / 3600) .. " " .. S.unitHour end
+  return math.floor(s / 86400) .. " " .. S.unitDay
+end
+
+local function truncate(s, n)
+  local len = utf8.len(s)
+  if len and len > n then return s:sub(1, utf8.offset(s, n) - 1) .. "…" end
+  return s
+end
+
+local function sortedEntries(list, state)
+  local l = {}
+  for _, e in ipairs(list) do if e.state == state then l[#l + 1] = e end end
+  -- Waiting: oldest first. Others: latest first.
+  table.sort(l, function(a, b)
+    if state == "attention" then return a.at < b.at end
+    return a.at > b.at
+  end)
+  return l
+end
+
+local function allEntries(state)
+  local all = {}
+  for _, p in ipairs(profiles) do
+    for _, e in ipairs(p.view or {}) do all[#all + 1] = e end
+  end
+  return sortedEntries(all, state)
+end
+
+local function sessionItem(e, withAccount)
+  local font = { name = UI_FONT, size = 13 }
+  -- System colours: they follow the menu's light or dark look.
+  local label = { list = "System", name = "labelColor" }
+  local grey = { list = "System", name = "secondaryLabelColor" }
+  local t = hs.styledtext.new(GLYPHS[e.state] .. "  ", { color = COLORS[e.state], font = font })
+  if withAccount then t = t .. hs.styledtext.new(e.p.label .. "   ", { color = { hex = e.p.color }, font = font }) end
+  t = t .. hs.styledtext.new(truncate(e.title, 60), { font = font, color = label })
+    .. hs.styledtext.new("   " .. agoText(e.at), { color = grey, font = { name = UI_FONT, size = 12 } })
+  local sub = {}
+  if e.why then sub[#sub + 1] = e.why end
+  if e.agents and e.agents > 0 then sub[#sub + 1] = S.agents(e.agents) end
+  if #sub > 0 then
+    t = t .. hs.styledtext.new("\n      " .. truncate(table.concat(sub, " · "), 90),
+      { color = grey, font = { name = UI_FONT, size = 11 } })
+  end
+  return {
+    title = t,
+    fn = function(mods)
+      if mods and mods.alt and e.edge then M.dismiss(e.p.id, e.id, e.edge)
+      else M.openSession(e.p.id, e.id) end
+    end,
+  }
+end
+
+local function dismissHint(items, entries)
+  for _, e in ipairs(entries) do
+    if e.edge then
+      items[#items + 1] = { title = "-" }
+      items[#items + 1] = { title = S.dismissHint, disabled = true }
+      return
+    end
+  end
+end
+
+-- One account's sessions, by state.
+local function sessionItems(p)
+  local items = {}
+  for _, st in ipairs(ORDER) do
+    local l = sortedEntries(p.view or {}, st)
+    if #l > 0 then
+      items[#items + 1] = { title = SECTION[st], disabled = true }
+      for _, e in ipairs(l) do items[#items + 1] = sessionItem(e, false) end
+    end
+  end
+  if #items == 0 then items[1] = { title = S.noSessions, disabled = true } end
+  return items
+end
+
+-- All accounts: the sessions waiting for you, oldest first; the others folded
+-- into submenus.
+local function queueItems()
+  local items = {}
+  local waiting = allEntries("attention")
+  if #waiting > 0 then
+    items[#items + 1] = { title = S.queueTitle, disabled = true }
+    for _, e in ipairs(waiting) do items[#items + 1] = sessionItem(e, true) end
+  else
+    items[#items + 1] = { title = S.noneWaiting, disabled = true }
+  end
+  for _, st in ipairs({ "working", "done" }) do
+    local l = allEntries(st)
+    if #l > 0 then
+      local sub = {}
+      for _, e in ipairs(l) do sub[#sub + 1] = sessionItem(e, true) end
+      items[#items + 1] = { title = SECTION[st] .. "  (" .. #l .. ")", menu = sub }
+    end
+  end
+  items[#items + 1] = { title = "-" }
+  items[#items + 1] = { title = S.nextWaiting, disabled = #waiting == 0, fn = function() M.nextWaiting() end }
+  dismissHint(items, waiting)
+  return items
+end
+
+local function popup(items, at)
+  if M.tabPopup then M.tabPopup:delete() end
+  M.tabPopup = hs.menubar.new(false)
+  M.tabPopup:setMenu(items)
+  M.tabPopup:popupMenu(at or hs.mouse.absolutePosition())
+end
+
+local function sessionsMenu(p, at)
+  buildView(p)
+  local items = sessionItems(p)
+  dismissHint(items, sortedEntries(p.view or {}, "attention"))
+  popup(items, at)
+end
+
+-- (at: where to open it, for tests; else under the mouse)
+function M.queueMenu(at)
+  buildViews()
+  popup(queueItems(), at)
+end
+
+function M.sessionsMenu(id, at)
+  if byId[id] then sessionsMenu(byId[id], at) end
+end
+
+-- The text of a menu ("queue", or a tab's id), for checks.
+function M.menuText(which)
+  buildViews()
+  local items = which == "queue" and queueItems() or (byId[which] and sessionItems(byId[which])) or {}
+  local out = {}
+  local function add(list, indent)
+    for _, it in ipairs(list) do
+      local t = type(it.title) == "string" and it.title or it.title:getString()
+      out[#out + 1] = indent .. (it.disabled and "(·) " or "") .. t:gsub("\n", "\n" .. indent)
+      if it.menu then add(it.menu, indent .. "    ") end
+    end
+  end
+  add(items, "")
+  return table.concat(out, "\n")
+end
+
+-- Open a session in its account (or just that account, when it is unknown).
+function M.openSession(profileId, sessionId)
+  local p = byId[profileId]
+  if not p then return end
+  refresh()
+  if not sessionId or not p.pid then M.switchTo(p.id); return end
+  M.sendLink("claude://code/continue?session=" .. sessionId, p.id, true)
+end
+
+-- Drop a waiting session from the lists until its next turn.
+function M.dismiss(profileId, sessionId, edge)
+  dismissed[sessionId] = edge
+  hs.settings.set(DISMISS_KEY, dismissed)
+  local p = byId[profileId]
+  if p then buildView(p) end
+  draw()
+end
+
+-- ⌃⌥N: the oldest session waiting for you, then the next one at each press.
+local lastJump
+function M.nextWaiting()
+  buildViews()
+  local l = allEntries("attention")
+  if #l == 0 then hs.alert.show(S.noneWaiting); return end
+  local pick = l[1]
+  for i, e in ipairs(l) do
+    if e.id ~= nil and e.id == lastJump and l[i + 1] then pick = l[i + 1] end
+  end
+  lastJump = pick.id
+  M.openSession(pick.p.id, pick.id)
 end
 
 -- Put every tab's window at the group's place (without changing the front one).
@@ -780,7 +1160,7 @@ local dragTap
 local lastDown = { t = 0, x = -100 }
 local PLUS_W = cfg.addButton == false and 0 or 32
 local tabMenu  -- defined with the tab actions below
-local function tabWidth() return (zone().bar.w - PLUS_W) / #profiles end
+local function tabWidth() return (zone().bar.w - PLUS_W - queueW) / #profiles end
 
 local function onBarClick(_, msg, _, x, _)
   if msg ~= "mouseDown" then return end
@@ -791,10 +1171,21 @@ local function onBarClick(_, msg, _, x, _)
     hs.timer.doAfter(0, function() M.addProfile() end)
     return
   end
+  if queueW > 0 and x >= zone().bar.w - PLUS_W - queueW then
+    hs.timer.doAfter(0, function() M.queueMenu() end)
+    return
+  end
   -- Right-click (or ctrl-click) on a tab: its menu.
   if buttons.right or flags.ctrl then
     local p = profiles[math.floor(x / tabWidth()) + 1]
     if p then hs.timer.doAfter(0, function() tabMenu(p) end) end
+    return
+  end
+  -- Click on a tab's badges: its sessions.
+  local hb = hitBadges[math.floor(x / tabWidth()) + 1]
+  if hb and x >= hb[1] and x <= hb[2] then
+    local p = profiles[math.floor(x / tabWidth()) + 1]
+    hs.timer.doAfter(0, function() sessionsMenu(p) end)
     return
   end
   local now = hs.timer.secondsSinceEpoch()
@@ -861,8 +1252,31 @@ drawBar = function()
     canvas:frame(z.bar)
   end
 
-  local tabW = (z.bar.w - PLUS_W) / #profiles
+  -- The red "waiting for you" button, before the "+": only when a session
+  -- of some account waits for you. "! 2 · 3 h" (the oldest wait).
+  local waiting = allEntries("attention")
+  local queueText
+  if #waiting > 0 then
+    queueText = pillText(GLYPHS.attention, #waiting .. "  ·  " .. agoText(waiting[1].at), { white = 1 })
+    queueW = math.ceil(hs.drawing.getTextDrawingSize(queueText).w) + 26
+  else
+    queueW = 0
+  end
+  local tabW = (z.bar.w - PLUS_W - queueW) / #profiles
   local els = { { type = "rectangle", action = "fill", fillColor = COLORS.bg } }
+  if queueText then
+    local qx = z.bar.w - PLUS_W - queueW
+    els[#els + 1] = {
+      type = "rectangle", action = "fill", fillColor = COLORS.attention,
+      frame = { x = qx + 4, y = 5, w = queueW - 6, h = BAR_H - 10 },
+      roundedRectRadii = { xRadius = (BAR_H - 10) / 2, yRadius = (BAR_H - 10) / 2 },
+    }
+    els[#els + 1] = {
+      type = "text",
+      frame = { x = qx + 4, y = BAR_H / 2 - 7, w = queueW - 6, h = 15 },
+      text = queueText:setStyle({ paragraphStyle = { alignment = "center" } }),
+    }
+  end
   if PLUS_W > 0 then  -- "+" button after the last tab: add an account
     els[#els + 1] = {
       type = "text",
@@ -883,7 +1297,8 @@ drawBar = function()
       fill = (nDone > 0 or nAtt > 0) and { hex = p.color, alpha = 0.35 } or COLORS.tab
     end
     local badges = badgeList(p)
-    local badgesW = #badges * (2 * BADGE_R + BADGE_GAP)
+    local badgesW = 0
+    for _, b in ipairs(badges) do badgesW = badgesW + b.w + BADGE_GAP end
     els[#els + 1] = {
       type = "rectangle", action = "fill", fillColor = fill,
       frame = { x = x0 + 3, y = 3, w = tabW - 6, h = BAR_H - 6 },
@@ -941,22 +1356,19 @@ drawBar = function()
       text = text,
     }
     local bx = x0 + tabW - 8 - badgesW + BADGE_GAP
+    hitBadges[i] = #badges > 0 and { bx - 4, x0 + tabW - 4 } or nil
     for _, b in ipairs(badges) do
-      local cx = bx + BADGE_R
       els[#els + 1] = {
-        type = "circle", action = "fill", fillColor = b.color,
-        center = { x = cx, y = BAR_H / 2 }, radius = BADGE_R,
+        type = "rectangle", action = "fill", fillColor = b.color,
+        frame = { x = bx, y = BAR_H / 2 - BADGE_H / 2, w = b.w, h = BADGE_H },
+        roundedRectRadii = { xRadius = BADGE_H / 2, yRadius = BADGE_H / 2 },
       }
       els[#els + 1] = {
         type = "text",
-        frame = { x = cx - BADGE_R, y = BAR_H / 2 - 7, w = 2 * BADGE_R, h = 14 },
-        text = hs.styledtext.new(b.n > 9 and "9+" or tostring(b.n), {
-          font = { name = "HelveticaNeue-Bold", size = b.n > 9 and 8 or 10 },
-          color = b.text,
-          paragraphStyle = { alignment = "center" },
-        }),
+        frame = { x = bx, y = BAR_H / 2 - 7, w = b.w, h = 15 },
+        text = b.text:setStyle({ paragraphStyle = { alignment = "center" } }),
       }
-      bx = bx + 2 * BADGE_R + BADGE_GAP
+      bx = bx + b.w + BADGE_GAP
     end
   end
   canvas:replaceElements(els)
@@ -978,7 +1390,9 @@ local function drawMenubar()
   if att > 0 then title = title .. hs.styledtext.new(" " .. att, { color = COLORS.attention, font = font }) end
   menubar:setTitle(title)
   menubar:setMenu(function()
-    local items = {}
+    buildViews()
+    local items = queueItems()
+    items[#items + 1] = { title = "-" }
     for i, p in ipairs(profiles) do
       local st = stateText(p)
       if st == "" then st = countsText(p) end
@@ -1035,7 +1449,9 @@ local function markSeenSoon(p)
     seenTimers[p.id] = nil
     local a = markDisplayedSeen(p)
     local b = rescan(p)
-    if a or b then saveSessions(); draw() end
+    if a or b then saveSessions() end
+    buildView(p)
+    draw()
   end)
 end
 
@@ -1156,12 +1572,15 @@ function M.removeProfile(id, confirmed)
 end
 
 tabMenu = function(p)
-  local items = {
+  buildView(p)
+  local items = sessionItems(p)
+  items[#items + 1] = { title = "-" }
+  for _, it in ipairs({
     { title = S.menuSignInTab, fn = function() M.startSignIn(p.id) end },
     { title = S.menuRename, fn = function() M.renameProfile(p.id) end },
     { title = S.menuRemove, disabled = #profiles <= 1, fn = function() M.removeProfile(p.id) end },
     { title = "-" },
-  }
+  }) do items[#items + 1] = it end
   if SHOW_USAGE then
     local u = usageDetail(p)
     if u then items[#items + 1] = { title = u, disabled = true } end
@@ -1172,10 +1591,7 @@ tabMenu = function(p)
   for _, it in ipairs({
     { title = S.menuAdd, fn = function() M.addProfile() end },
   }) do items[#items + 1] = it end
-  if M.tabPopup then M.tabPopup:delete() end
-  M.tabPopup = hs.menubar.new(false)
-  M.tabPopup:setMenu(items)
-  M.tabPopup:popupMenu(hs.mouse.absolutePosition())
+  popup(items)
 end
 
 -- Modifier + scroll (mouse or trackpad) while Claude is in front: one notch =
@@ -1237,7 +1653,7 @@ local CLAUDE_LOG = HOME .. "/Library/Logs/Claude/main.log"
 local signInTimer, logWatcher, logOffset
 
 -- Send a claude:// link to one given instance instead of letting macOS pick.
-function M.sendLink(url, id)
+function M.sendLink(url, id, quiet)
   refresh()
   local p = byId[id or activeId]
   if not p or not p.pid then hs.alert.show(S.notRunning); return false end
@@ -1245,7 +1661,7 @@ function M.sendLink(url, id)
     .. " " .. math.tointeger(p.pid) .. " " .. shq(url) .. " 2>&1")
   if ok then
     log.i("claude:// link sent to " .. p.id .. " (pid " .. math.tointeger(p.pid) .. ")")
-    hs.alert.show(S.linkSent:format(p.label))
+    if not quiet then hs.alert.show(S.linkSent:format(p.label)) end
     M.switchTo(p.id)
   else
     hs.alert.show(S.sendFailed:format(out or ""))
@@ -1375,6 +1791,7 @@ local function onHookEvent(_, params)
     if s and s.state == "attention" then setSession(p, cli, "working") end
   end
   saveSessions()
+  buildView(p)
   draw()
 end
 
@@ -1450,6 +1867,7 @@ function M.start()
   hs.window.timeout(2)
   M.makeLaunchers()
   loadSessions()
+  for id, edge in pairs(hs.settings.get(DISMISS_KEY) or {}) do dismissed[id] = tonumber(edge) end
   refresh()
 
   local front = hs.application.frontmostApplication()
@@ -1518,11 +1936,12 @@ function M.start()
   local function watchSessions(p)
     if M.sessionWatchers[p.id] or not hs.fs.attributes(sessionsDir(p)) then return end
     M.sessionWatchers[p.id] = hs.pathwatcher.new(sessionsDir(p), function()
-      if next(p.sessions) == nil then return end
-      if scanTimers[p.id] then scanTimers[p.id]:stop() end
-      scanTimers[p.id] = hs.timer.doAfter(1, function()
+      if scanTimers[p.id] then return end  -- at most one read per 3 s
+      scanTimers[p.id] = hs.timer.doAfter(3, function()
         scanTimers[p.id] = nil
-        if rescan(p) then draw() end
+        rescan(p)
+        buildView(p)
+        draw()
       end)
     end):start()
   end
@@ -1535,13 +1954,20 @@ function M.start()
     for _, p in ipairs(profiles) do
       watchSessions(p)
       for id, s in pairs(p.sessions) do
-        if s.state ~= "done" and s.at < limit then p.sessions[id] = nil; changed = true end
+        -- (still alive while its conversation is being written)
+        if s.state ~= "done" and math.max(s.at, s.alive or 0) < limit then
+          p.sessions[id] = nil; changed = true
+        end
       end
       if rescan(p) then changed = true end
     end
-    if changed then saveSessions(); draw() end
+    if changed then saveSessions(); buildViews(); draw() end
   end)
   for _, p in ipairs(profiles) do watchSessions(p); rescan(p) end
+  buildViews()
+
+  -- Every 30 s: what the sessions are doing (background agents, etc.).
+  M.viewTimer = hs.timer.doEvery(30, function() buildViews(); draw() end)
 
   -- Usage: every minute, re-read the files Claude wrote (a stat each, unless
   -- they changed). When an account's numbers are stale, and you have been
@@ -1612,6 +2038,7 @@ function M.start()
   for _, p in ipairs(profiles) do bindTabHotkey(p) end
   M.hotkeys[#M.hotkeys + 1] = hs.hotkey.bind(MODS, "F", function() M.fillScreen() end)
   M.hotkeys[#M.hotkeys + 1] = hs.hotkey.bind(MODS, "E", function() M.nextScreen() end)
+  M.hotkeys[#M.hotkeys + 1] = hs.hotkey.bind(MODS, "N", function() M.nextWaiting() end)
   M.hotkeys[#M.hotkeys + 1] = hs.hotkey.bind(MODS, "L", function()
     if signInTarget then M.stopSignIn(); hs.alert.show(S.signInStopped)
     else M.startSignIn() end
@@ -1642,6 +2069,12 @@ function M.geometry()
     tostring(canvas and canvas:frame()), tostring(canvas and canvas:isShowing()))
 end
 
+-- Save a picture of the bar (shown or not) to a PNG file, for checks.
+function M.snapshot(path)
+  drawBar()
+  return canvas and canvas:imageFromCanvas():saveToFile(path) or false
+end
+
 function M.resetGroup()
   groupFrame = nil
   hs.settings.clear(GROUP_KEY)
@@ -1656,7 +2089,7 @@ function M.forgetSession(cliId)
       if id == cliId or (prefix and id:sub(1, #prefix) == prefix) then p.sessions[id] = nil end
     end
   end
-  saveSessions(); draw()
+  saveSessions(); buildViews(); draw()
 end
 
 function M.state()
@@ -1668,6 +2101,19 @@ function M.state()
     for id, s in pairs(p.sessions) do
       out[#out + 1] = string.format("   %s %s %s", id:sub(1, 8), s.state,
         s.file and s.file:match("local_[%w%-]+") or "(no file)")
+    end
+  end
+  return table.concat(out, "\n")
+end
+
+-- What the tabs show, per session: "team attention 3h  Marketing… — choisir…".
+function M.sessions()
+  buildViews()
+  local out = {}
+  for _, p in ipairs(profiles) do
+    for _, e in ipairs(p.view or {}) do
+      out[#out + 1] = string.format("%s %s %dmin agents=%d  %s — %s", p.id, e.state,
+        math.floor((nowMs() - e.at) / 60000), e.agents or 0, e.title, e.why or e.detail or "")
     end
   end
   return table.concat(out, "\n")

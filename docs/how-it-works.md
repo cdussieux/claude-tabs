@@ -78,3 +78,47 @@
   settings, a Claude session's usage tool), give it once:
   `hs -c 'ClaudeTabs.setReset("<id>", <epoch seconds>)'`. It holds for the
   following weeks.
+
+## Session states
+
+The hooks say when a turn starts, stops, or stops for a permission or a
+question. Three things they miss, read from Claude's files instead:
+
+- **Agents left running in the background.** A session can end its turn
+  ("the interface agent is still working, I'll pick up its report") while
+  agents keep working; Claude shows it as busy, the `Stop` hook said done. Their
+  transcripts are `~/.claude/projects/<folder>/<cli id>/subagents/agent-*.jsonl`;
+  one written in the last 3 min counts as at work. Their last line does not say
+  whether they are finished (it is often a tool result), so the date is the
+  only signal. `<folder>` is the session's `cwd` with every character other
+  than a letter or digit turned into `-`; a session moved to another folder
+  keeps its old one, so Claude Tabs falls back to looking for `<cli id>.jsonl`
+  in every folder (then remembers it).
+- **Turns Claude starts by itself** (when such an agent reports back) fire no
+  `UserPromptSubmit`. The main transcript, when written in the last minute and
+  not ending with an assistant message whose `stop_reason` is `end_turn`,
+  counts as a turn going on.
+- **A question asked in the last message.** After each turn Claude writes a
+  `postTurnSummary` in the session file: `status_category` (`completed`,
+  `blocked`, `review_ready`…), `status_detail`, and `needs_action` (what it needs
+  from you, in the session's language). It is about the last turn only when
+  `postTurnSummaryFor` equals `lastAssistantUuid`. A non-empty `needs_action`
+  (or `blocked`) makes the session "waiting for you" until its next turn, for
+  24 h at most (`waitingMaxAge`), or until you ⌥-click it away (kept in
+  `hs.settings` "claudeTabs.dismissed", per session and turn).
+
+Claude Desktop's own "Sessions waiting for you" (Dock menu) only counts
+pending permissions (`pendingToolPermissions`, kept in memory, not in the
+file); the hooks already see those.
+
+Session files are decoded only when their date changed, and only those touched
+in the last 24 h plus the ones the hooks track: a full pass takes 10 to 20 ms.
+
+Opening a session: `claude://code/continue?session=local_…` (the link Claude's
+Dock menu and Spotlight use), sent to the account's instance like a sign-in
+link. To check from a terminal:
+
+```bash
+hs -c 'return ClaudeTabs.sessions()'        # what each tab shows
+hs -c 'return ClaudeTabs.menuText("queue")' # the red button's menu (or a tab's id)
+```
