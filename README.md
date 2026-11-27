@@ -38,12 +38,9 @@ stacks their windows under a tab bar drawn by [Hammerspoon](https://www.hammersp
   next one waiting.
   ⌥-click one you won't answer now to drop it until its next turn. The same
   list sits in the menu bar (✳︎).
-- **Session ring**: `⌃⌥⇧⌘R` (from any app, or a mouse button that sends it)
-  opens your 6 latest sessions, all accounts mixed, in a ring around the
-  pointer, each with its state (! waiting for you, ⋯ working, ✓ done). Point
-  at one and click, or press the shortcut again: it opens in its account,
-  which is started first if it is closed. Esc, right-click or the middle closes
-  it. `ringHotkey`, `ringCount` in the config.
+- **Session ring**: `⌃⌥⇧⌘R` (or a mouse button) opens your latest sessions of
+  all accounts in a ring around the pointer; flick toward one to open it.
+  [More](#session-ring).
 - **Plan usage on each tab**: the account's weekly usage and when it resets
   (`Team · 12% · ↻ Fri 9:00`, or `↻ ~Fri` while the hour is not known yet),
   and a gauge under the tab: the bar is the usage, the tick how much of the
@@ -53,16 +50,9 @@ stacks their windows under a tab bar drawn by [Hammerspoon](https://www.hammersp
 - **Behaves like one window**: drag the tab bar to move the group to another
   screen; it fills the screen it is on (`autoFill`), and follows the Dock and
   screens being plugged or woken up. `⌃⌥E` moves it to the next screen.
-- **Hand a task to another account**: when an account is near its limit, or a
-  task needs a connector only another account has, an agent (or you) runs
-  `claude-tabs handoff --to team|auto "<brief>"`. The other account opens a
-  new session in the same folder with the brief typed in: you read it and
-  press Enter, or with `handoffAutoSend = true` Claude Tabs presses it for you
-  (only once the brief is in the message box and has the focus). `--to auto` picks the account with the most weekly usage
-  left. `claude-tabs accounts` lists the accounts, their usage and your notes
-  (right-click a tab > Notes for agents: "work Gmail, Notion"…). A skill,
-  `claude-tabs-handoff`, tells agents when and how to offer it; the new
-  session reports back to the one that sent it.
+- **Hand a task to another account**: an agent near its account's limit, or
+  missing a connector another account has, opens a new session there with a
+  brief for you to send. [More](#handing-a-task-to-another-account).
 - **`+` button** after the last tab to add an account; **right-click a tab** to
   rename or remove it.
 - **Sign-ins land in the right tab**: the browser's "Open Claude" link goes back
@@ -132,6 +122,80 @@ own sign-in sheet, which answers the right instance directly.
 | `⌃⌥⇧⌘R` (any app) | session ring: your latest sessions around the pointer |
 
 All are configurable in `config.lua`.
+
+## Session ring
+
+<p align="center"><img src="docs/images/session-ring.png" width="380"
+alt="A ring of six Claude Code sessions around the mouse pointer, each with its title, account, age and state"></p>
+
+Press `⌃⌥⇧⌘R`, from any app: your 6 latest Code sessions, all accounts mixed,
+open in a ring around the pointer. Each slice shows the session's title, its
+account in the tab's colour, how long ago it was active, and its state:
+`!` waiting for you, `⋯` working, `✓` done and not opened yet. Move toward a
+slice, then click (or press the shortcut again) to open that session in its
+account; a closed account is started first. Esc, right-click or a click in the
+middle closes the ring.
+
+It works best on a mouse button: press it, flick toward a session, press
+again.
+
+- **Logitech mice (Logi Options+)**: pick a button (the middle button, a thumb
+  button, the gesture button, the MX Master 4's haptic panel…), choose
+  *Keyboard shortcut* and press `⌃⌥⇧⌘R`. Set it for *All applications*, not
+  only Claude, so the ring opens from anywhere.
+- **Logitech G mice (G HUB)**: assign the button the same key combination.
+- **Any mouse, with [Karabiner-Elements](https://karabiner-elements.pqrs.org)**
+  (free): save this as
+  `~/.config/karabiner/assets/complex_modifications/claude-tabs.json`, then in
+  Karabiner's settings add the rule (*Complex Modifications > Add rule*) and
+  turn on *Modify events* for your mouse (*Devices*):
+
+  ```json
+  {
+    "title": "Claude Tabs",
+    "rules": [{
+      "description": "Middle button opens the Claude Tabs session ring",
+      "manipulators": [{
+        "type": "basic",
+        "from": { "pointing_button": "button3" },
+        "to": [{ "key_code": "r",
+                 "modifiers": ["left_control", "left_option", "left_shift", "left_command"] }]
+      }]
+    }]
+  }
+  ```
+
+  The middle button then no longer middle-clicks (opening links in a new tab,
+  closing browser tabs). If you use that, take a side button instead:
+  `button4` or `button5`.
+
+In `config.lua`: `ringHotkey` changes the shortcut, `ringCount` the number of
+sessions, `ring = false` turns it off.
+
+## Handing a task to another account
+
+When one account is close to its limit, or a task needs a connector only
+another account has (its Gmail, its Notion…), an agent can pass the task on:
+
+```bash
+~/.hammerspoon/claude-tabs/claude-tabs accounts      # accounts, usage, notes
+~/.hammerspoon/claude-tabs/claude-tabs handoff --to work --folder ~/code/app "<brief>"
+```
+
+The other account opens a new session in that folder with the brief typed in;
+you read it and press Enter. `--to auto` picks the account with the most
+weekly usage left. The install adds a skill, `claude-tabs-handoff`, so agents
+know when to offer it and how to write a brief that stands on its own; the
+new session reports back to the one that sent it.
+
+- **Notes for agents**: right-click a tab > *Notes for agents…* and say what
+  that account has that the others don't ("work Gmail, Notion"). Agents read
+  them in `claude-tabs accounts` to pick the right account.
+- **Auto-send**: with `handoffAutoSend = true`, Claude Tabs presses Enter for
+  you, but only once the brief is in the message box and has the focus, and
+  you have not touched the keyboard or mouse for a second. Otherwise the brief
+  stays typed. The agent's brief then becomes your prompt in that account
+  without you reading it first: turn it on only if you are fine with that.
 
 ## How it works
 
