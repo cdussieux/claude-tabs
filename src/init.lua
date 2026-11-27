@@ -127,7 +127,22 @@ local function refresh()
   for _, app in ipairs(hs.application.applicationsForBundleID(BUNDLE)) do
     local pid = app:pid()
     local p = pidProfile(pid)
-    if p then p.pid = pid; seen[p.id] = true end
+    if p then
+      seen[p.id] = seen[p.id] or {}
+      seen[p.id][pid] = true
+    end
+  end
+  for _, p in ipairs(profiles) do
+    local pids = seen[p.id]
+    if pids then
+      -- Two copies of one account (one started by hand): keep the one already
+      -- in use, else the oldest, so links never go to one then the other.
+      if not (p.pid and pids[p.pid]) then
+        local first
+        for pid in pairs(pids) do if not first or pid < first then first = pid end end
+        p.pid = first
+      end
+    end
   end
   for _, p in ipairs(profiles) do
     if not seen[p.id] then
@@ -655,10 +670,28 @@ local function launchCommand(p)
   return cmd
 end
 
+-- Start a closed account. Never a second copy of a running one: two Claude
+-- instances on the same data dir would fight over it.
 local function launch(p)
+  refresh()
+  if p.pid then
+    log.i("not launching " .. p.id .. ": already running (pid " .. math.tointeger(p.pid) .. ")")
+    return false
+  end
   if p.dataDir then hs.execute("mkdir -p " .. shq(p.dataDir)) end
   log.i("launching profile " .. p.id)
   hs.execute(launchCommand(p))
+  return true
+end
+
+-- A running account whose window was not found (busy, on another Space, or
+-- closed): bring it forward as a click on its Dock icon would, which also
+-- reopens a closed window.
+local function reopen(p)
+  local app = hs.application.applicationForPID(p.pid)
+  if app then app:activate(true) end
+  hs.execute("/usr/bin/osascript -l JavaScript " .. shq(DIR .. "/send-url.js")
+    .. " " .. math.tointeger(p.pid) .. " --reopen 2>&1")
 end
 
 -- Run fn once the account has a window, starting it first if it is closed
@@ -1807,22 +1840,37 @@ local function markSeenSoon(p)
   end)
 end
 
+local reopenTimer
 function M.switchTo(id)
   local p = byId[id]
   if not p then return end
   refresh()
   local w = profileWindow(p)
+  activeId = id
   if not w then
-    -- Not running, or its window was closed: launching the profile again opens it.
-    launch(p)
-    activeId = id
+    if not p.pid then launch(p); draw(); return end
+    -- Running, window not found: bring it back, then place it once it shows.
+    reopen(p)
+    local tries = 0
+    if reopenTimer then reopenTimer:stop() end
+    reopenTimer = hs.timer.doEvery(0.5, function()
+      tries = tries + 1
+      local w2 = p.pid and profileWindow(p)
+      if w2 or tries >= 6 then
+        reopenTimer:stop(); reopenTimer = nil
+        if w2 and activeId == id then
+          if w2:isMinimized() then w2:unminimize() end
+          placeWindow(w2); w2:focus(); markSeenSoon(p)
+        end
+        draw()
+      end
+    end)
     draw()
     return
   end
   if w:isMinimized() then w:unminimize() end
   placeWindow(w)
   w:focus()
-  activeId = id
   markSeenSoon(p)
   draw()
 end
@@ -2149,7 +2197,7 @@ local function onHookEvent(_, params)
   local p = pid and pidProfile(pid)
   if not p then refresh(); p = pid and pidProfile(pid) end
   if not p then return end
-  p.pid = pid
+  if p.pid ~= pid then refresh() end   -- a copy started or quit
   local cli = params.session
   if not cli or cli == "" then return end
   local ev = params.event
@@ -2193,7 +2241,7 @@ local function onWindowEvent(w, _, event)
   if not app or app:bundleID() ~= BUNDLE then return end
   local p = pidProfile(app:pid())
   if not p then return end
-  p.pid = app:pid()
+  if p.pid ~= app:pid() then refresh() end
   if not isTabWindow(w) then return end
   local wf = hs.window.filter
   if event == wf.windowMoved then
